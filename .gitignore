@@ -1,0 +1,17 @@
+# Alles hier wird NICHT auf GitHub hochgeladen (das Repository ist öffentlich).
+
+# Private Dateien
+testbilder/
+PROJEKTSTAND.md
+.claude/
+
+# Screenshots der Vorbild-App (fremdes Material)
+2026*_iOS.png
+
+# Temporäre Testseiten
+_*.html
+
+# Systemdateien
+Thumbs.db
+desktop.ini
+.DS_Store

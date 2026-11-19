@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <!-- Sicherheit: Der Browser erlaubt nur Verbindungen zur eigenen Adresse und zum eigenen Sync-Server (Supabase) -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' blob:; worker-src 'self' blob:; connect-src 'self' blob: data: https://adgbntfsihgzzwrngadf.supabase.co; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <title>Kleiderschrank</title>
+  <meta name="description" content="Dein digitaler Kleiderschrank: Kleidung fotografieren und Outfits zusammenstellen.">
+  <meta name="theme-color" content="#F6F5F0" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#151613" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Schrank">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <nav class="nav" aria-label="Hauptnavigation">
+      <div class="nav-brand">Schrank</div>
+      <button class="nav-btn" data-view="wardrobe" aria-current="page">
+        <svg viewBox="0 0 24 24"><path d="M12 6.5a2 2 0 1 1 2-2c0 1-1 1.4-1.6 1.9-.4.3-.4.6-.4 1.1M3.5 17.5 12 11.8l8.5 5.7c.6.4.3 1.5-.5 1.5H4c-.8 0-1.1-1.1-.5-1.5Z"/></svg>
+        <span>Schrank</span>
+      </button>
+      <button class="nav-btn" data-view="studio">
+        <svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><path d="M17 14v6M14 17h6"/></svg>
+        <span>Studio</span>
+      </button>
+      <button class="nav-btn" data-view="outfits">
+        <svg viewBox="0 0 24 24"><path d="M6.5 3.5h11a1 1 0 0 1 1 1v16l-6.5-4-6.5 4v-16a1 1 0 0 1 1-1Z"/></svg>
+        <span>Outfits</span>
+      </button>
+    </nav>
+
+    <main class="main">
+      <!-- Schrank -->
+      <section class="view" id="view-wardrobe">
+        <header class="view-head">
+          <div>
+            <h1>Schrank</h1>
+            <p class="sub" id="wardrobe-count"></p>
+          </div>
+          <button class="icon-btn" id="btn-settings" aria-label="Einstellungen und Backup">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+          </button>
+        </header>
+        <div class="chips" id="wardrobe-filter" role="tablist" aria-label="Kategorie"></div>
+        <div class="grid" id="wardrobe-grid"></div>
+        <div class="empty" id="wardrobe-empty" hidden>
+          <div class="empty-art" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M12 6.5a2 2 0 1 1 2-2c0 1-1 1.4-1.6 1.9-.4.3-.4.6-.4 1.1M3.5 17.5 12 11.8l8.5 5.7c.6.4.3 1.5-.5 1.5H4c-.8 0-1.1-1.1-.5-1.5Z"/></svg>
+          </div>
+          <h2>Dein Schrank ist noch leer</h2>
+          <p>Fotografiere ein Kleidungsstück. Der Hintergrund wird automatisch entfernt.</p>
+          <button class="btn btn-primary" data-action="add-item">Erstes Teil hinzufügen</button>
+        </div>
+        <button class="fab" data-action="add-item" aria-label="Kleidungsstück hinzufügen">
+          <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+      </section>
+
+      <!-- Studio -->
+      <section class="view" id="view-studio" hidden>
+        <header class="view-head">
+          <div>
+            <h1 id="studio-title">Studio</h1>
+            <p class="sub" id="studio-sub">Tippe Teile an, um sie hinzuzufügen</p>
+          </div>
+          <div class="head-actions">
+            <button class="btn btn-ghost" id="btn-studio-shuffle" title="Zufälliges Outfit aus deinem Schrank">
+              <svg viewBox="0 0 24 24"><path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
+              <span>Zufall</span>
+            </button>
+            <button class="btn btn-ghost" id="btn-studio-new">Leeren</button>
+            <button class="btn btn-primary" id="btn-studio-save">Speichern</button>
+          </div>
+        </header>
+        <div class="studio">
+          <div class="stage-wrap">
+            <div class="stage" id="stage" aria-label="Outfit-Fläche"></div>
+            <div class="stage-hint" id="stage-hint">Wähle unten Teile aus deinem Schrank aus</div>
+            <div class="piece-tools" id="piece-tools" hidden>
+              <button class="tool" data-tool="smaller" aria-label="Kleiner">−</button>
+              <button class="tool" data-tool="bigger" aria-label="Größer">+</button>
+              <button class="tool" data-tool="front">Nach vorne</button>
+              <button class="tool" data-tool="back">Nach hinten</button>
+              <button class="tool tool-danger" data-tool="remove">Entfernen</button>
+            </div>
+          </div>
+          <div class="drawer">
+            <div class="chips" id="studio-filter"></div>
+            <div class="drawer-items" id="studio-items"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Outfits -->
+      <section class="view" id="view-outfits" hidden>
+        <header class="view-head">
+          <div>
+            <h1>Outfits</h1>
+            <p class="sub" id="outfits-count"></p>
+          </div>
+        </header>
+        <div class="grid grid-outfits" id="outfits-grid"></div>
+        <div class="empty" id="outfits-empty" hidden>
+          <h2>Noch keine Outfits</h2>
+          <p>Stell im Studio Teile zusammen und speichere sie als Outfit.</p>
+          <button class="btn btn-primary" data-goto="studio">Zum Studio</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <input type="file" id="file-input" accept="image/*" hidden>
+  <input type="file" id="import-input" accept="application/json,.json" hidden>
+  <dialog class="sheet" id="sheet"></dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
