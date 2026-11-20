@@ -247,8 +247,10 @@ function renderWardrobe() {
 
 /* ---------- Sheet (Dialog) ---------- */
 const sheet = $('#sheet');
-function openSheet(html) {
+/** sticky: nur über das Kreuz schließen (kein Klick daneben, keine Escape-Taste) – für Dialoge mit Eingaben. */
+function openSheet(html, { sticky = false } = {}) {
   sheet.innerHTML = html;
+  if (sticky) sheet.dataset.sticky = '1'; else delete sheet.dataset.sticky;
   if (!sheet.open) sheet.showModal();
   return sheet;
 }
@@ -490,7 +492,7 @@ async function openAddSheet(file) {
     <button class="btn btn-ghost btn-block" id="add-multi" style="margin-bottom:14px" hidden>Foto mit Person? Teile einzeln herauslösen</button>
     ${itemFieldsHtml(d)}
     <button class="btn btn-primary btn-block" id="add-save" disabled>Wird verarbeitet …</button>
-  </div>`);
+  </div>`, { sticky: true });
   bindItemFields(d);
 
   const preview = $('#add-preview', sheet);
@@ -678,7 +680,7 @@ function openMultiSheet(pieces) {
       </div>`).join('')}
     </div>
     <button class="btn btn-primary btn-block" id="multi-save" disabled>Wird analysiert …</button>
-  </div>`);
+  </div>`, { sticky: true });
   const saveBtn = $('#multi-save', sheet);
   const refresh = (i) => { const el = sheet.querySelector(`[data-name="${i}"]`); if (el) el.placeholder = defaultName(drafts[i]); };
   const updateCount = () => {
@@ -810,7 +812,7 @@ function openItemEditSheet(item) {
         <button class="btn btn-danger" id="item-delete">Löschen</button>
       </div>
     </div>
-  </div>`);
+  </div>`, { sticky: true });
   bindItemFields(d);
   const view = bindPreview($('#item-preview', sheet), (side) => (side === 'back'
     ? { blob: d.back, cutout: d.backCutout }
@@ -1606,6 +1608,43 @@ function accountHtml() {
     </div>`;
 }
 
+/* Marken verwalten: falsch geschriebene umbenennen (gleicher Name = zusammenführen) oder ganz entfernen */
+function brandsHtml() {
+  const brands = knownBrands();
+  if (!brands.length) return '';
+  return `<h3 class="section-title" style="margin-top:18px">Marken</h3>
+    <p class="note">Falsch geschrieben? Umbenennen ändert die Marke bei allen Teilen – heißt sie danach wie eine andere, werden beide zusammengeführt.</p>
+    <div class="brand-list" id="brand-list-edit">${brands.map((b) => `<div class="brand-row">
+      <div class="brand-name"><b>${esc(b.name)}</b><span>${plural(b.n, 'Teil', 'Teile')}</span></div>
+      <button class="btn btn-ghost btn-sm" data-brand="${esc(b.name)}" data-brand-act="rename">Umbenennen</button>
+      <button class="btn btn-danger btn-sm" data-brand="${esc(b.name)}" data-brand-act="delete" aria-label="${esc(b.name)} löschen">Löschen</button>
+    </div>`).join('')}</div>`;
+}
+async function editBrand(name, act) {
+  const key = name.toLowerCase();
+  const items = state.items.filter((i) => i.brand?.toLowerCase() === key);
+  let next = '';
+  if (act === 'rename') {
+    const v = prompt(`Neuer Name für „${name}“:`, name);
+    if (v === null) return;
+    next = String(v).trim().replace(/\s+/g, ' ');
+    if (next === name) return;
+    if (!next && !confirm(`Leerer Name: Marke „${name}“ bei ${plural(items.length, 'Teil', 'Teilen')} entfernen?`)) return;
+    // Gibt es die Marke schon (andere Schreibweise)? Dann deren Schreibweise übernehmen
+    if (next) next = knownBrands().find((b) => b.name.toLowerCase() === next.toLowerCase() && b.name.toLowerCase() !== key)?.name || next;
+  } else if (!confirm(`Marke „${name}“ bei ${plural(items.length, 'Teil', 'Teilen')} entfernen? Die Teile selbst bleiben.`)) return;
+  const now = Date.now();
+  for (const it of items) {
+    if (next) it.brand = next; else delete it.brand;
+    it.updatedAt = now;
+    await db.put('items', it);
+    sync.markChanged('item', it.id, 'put');
+  }
+  render();
+  if (sheet.open) openSettingsSheet();
+  toast(next ? `Marke heißt jetzt „${next}“` : `Marke „${name}“ entfernt`);
+}
+
 function openSettingsSheet() {
   openSheet(`<div class="sheet-inner">
     <div class="sheet-head"><h2>Daten & Konto</h2><button class="icon-btn" data-close aria-label="Schließen">${ICON.close}</button></div>
@@ -1615,6 +1654,7 @@ function openSettingsSheet() {
     </div>
     ${accountHtml()}
     ${installHtml()}
+    ${brandsHtml()}
     <h3 class="section-title" style="margin-top:18px">Backup</h3>
     <p class="note">${sync.status.signedIn ? 'Zusätzlich zum Sync kannst du jederzeit eine Sicherungsdatei erstellen.' : 'Ohne Konto wird alles nur auf diesem Gerät gespeichert. Mit einer Sicherungsdatei kannst du die Daten sichern oder übertragen.'}</p>
     <div class="stack">
@@ -1623,6 +1663,10 @@ function openSettingsSheet() {
     </div>
   </div>`);
   $('#do-install', sheet)?.addEventListener('click', async () => { await installApp(); if (sheet.open) openSettingsSheet(); });
+  $('#brand-list-edit', sheet)?.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-brand-act]');
+    if (b) editBrand(b.dataset.brand, b.dataset.brandAct);
+  });
   $('#do-export', sheet).onclick = exportBackup;
   $('#do-import', sheet).onclick = () => $('#import-input').click();
   $('#acc-signin', sheet)?.addEventListener('click', () => openAuthSheet('signin'));
@@ -1961,9 +2005,9 @@ async function init() {
   renderInstall();
   sheet.addEventListener('click', (e) => {
     if (sheet.dataset.locked) return; // z. B. Wiederherstellungs-Code muss erst bestätigt werden
-    if (e.target === sheet || e.target.closest('[data-close]')) closeSheet();
+    if (e.target.closest('[data-close]') || (e.target === sheet && !sheet.dataset.sticky)) closeSheet();
   });
-  sheet.addEventListener('cancel', (e) => { if (sheet.dataset.locked) e.preventDefault(); }); // Escape-Taste
+  sheet.addEventListener('cancel', (e) => { if (sheet.dataset.locked || sheet.dataset.sticky) e.preventDefault(); }); // Escape-Taste
   sync.onChange(reloadFromDb);
   sync.onStatus(() => {
     if (state.view === 'wardrobe') renderWardrobeCount();
