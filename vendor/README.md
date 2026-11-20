@@ -16,4 +16,4 @@ Jede Datei wurde beim Herunterladen gegen die offizielle Prüfsumme geprüft (np
 **Lizenz-Hinweise:** RMBG-1.4 ist nur für nicht-kommerzielle Nutzung freigegeben (für dieses private Projekt in Ordnung). Bei einer kommerziellen Nutzung muss es ersetzt oder eine Lizenz bei BRIA gekauft werden.
 Das frühere Modell MobileCLIP (Apple) wurde entfernt: Seine Lizenz erlaubt nur Forschungszwecke.
 
-**Aktualisieren:** Das Skript, mit dem die Dateien geladen wurden, prüft die Prüfsummen automatisch; neue Versionen bewusst und einzeln übernehmen, nicht automatisch.
+**Aktualisieren / nachprüfen:** mit `tools/fetch_vendor.py` (Anleitung: `tools/README.md`). `python -I tools/fetch_vendor.py verify` prüft alle Dateien gegen `SOURCES.json`. Neue Versionen bewusst und einzeln übernehmen, nicht automatisch.

@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>Vorberechnete Daten erzeugen</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 760px; margin: 32px auto; padding: 0 16px; background: #f6f5f0; color: #141413; }
+  button { font: inherit; padding: 8px 16px; border-radius: 999px; border: 0; background: #141413; color: #fff; cursor: pointer; margin: 4px 8px 4px 0; }
+  button:disabled { opacity: .4; }
+  pre { background: #fff; border: 1px solid #ddd; border-radius: 10px; padding: 12px; white-space: pre-wrap; word-break: break-all; max-height: 320px; overflow: auto; font-size: 12px; }
+  code { background: #ecebe4; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<h1>Vorberechnete Daten erzeugen</h1>
+<p>Entwickler-Werkzeug, nicht Teil der App. Es lädt einmalig die <b>Text-Modelle</b> direkt von huggingface.co (die App selbst braucht sie nicht) und erzeugt:</p>
+<ol>
+  <li><code>js/labels.json</code> – Text-Vektoren der Kleidungsarten für FashionSigLIP (Kategorie-Erkennung). Nötig, wenn sich <code>LABELS</code> unten ändert. Danach in <code>js/app.js</code> die deutschen Namen in <code>KIND_DE</code> ergänzen.</li>
+  <li><code>SEG_TOKENS</code> – Token-Nummern der CLIPSeg-Suchbegriffe. Nötig, wenn sich <code>SEG_GARMENTS</code> in <code>js/ai.js</code> oder die Gegenklassen unten ändern. Ergebnis in <code>js/ai.js</code> einfügen.</li>
+</ol>
+<p>Starten: <code>python -m http.server 8000</code> im Projektordner, dann <a href="/tools/labels.html">localhost:8000/tools/labels.html</a> öffnen.</p>
+<button id="b1">1. labels.json erzeugen (lädt ~111 MB)</button>
+<button id="b2">2. SEG_TOKENS erzeugen (klein)</button>
+<pre id="out">Bereit.</pre>
+
+<script type="module">
+import * as TF from '../vendor/transformers/transformers.min.js';
+import { SEG_GARMENTS } from '../js/ai.js';
+
+TF.env.allowRemoteModels = true;   // nur dieses Werkzeug darf von huggingface.co laden
+TF.env.allowLocalModels = false;
+TF.env.backends.onnx.wasm.wasmPaths = new URL('../vendor/ort/', location.href).href;
+
+// Kleidungsarten je Kategorie (englisch, weil das Modell englisch trainiert ist).
+// Reihenfolge = Reihenfolge in labels.json. Deutsche Namen: KIND_DE in js/app.js.
+const LABELS = {
+  oberteile: ['a t-shirt', 'a shirt', 'a polo shirt', 'a sweater', 'a hoodie', 'a sweatshirt', 'a long sleeve top', 'a tank top', 'a blouse', 'a knitted pullover'],
+  jacken: ['a jacket', 'a coat', 'a bomber jacket', 'a denim jacket', 'a blazer', 'a cardigan', 'a puffer jacket', 'a vest'],
+  kleider: ['a dress', 'a jumpsuit', 'a long dress', 'a summer dress'],
+  hosen: ['a pair of pants', 'jeans', 'trousers', 'shorts', 'a skirt', 'sweatpants', 'chinos', 'leggings'],
+  schuhe: ['a pair of shoes', 'sneakers', 'boots', 'sandals', 'leather dress shoes', 'heels', 'loafers'],
+  accessoires: ['a bag', 'a handbag', 'a backpack', 'a belt', 'a hat', 'a cap', 'sunglasses', 'a watch', 'a scarf', 'jewelry', 'a necklace', 'a tie', 'socks', 'gloves'],
+};
+const TEMPLATE = 'a product photo of {label}';
+// Gegenklassen für CLIPSeg (müssen zum Kommentar bei SEG_TOKENS in js/ai.js passen)
+const SEG_NEGATIVE = ['a face', 'hair', 'an arm', 'a hand', 'skin', 'a leg', 'the background'];
+
+const out = document.getElementById('out');
+const log = (s) => { out.textContent = s; };
+const download = (name, text) => {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+  a.download = name; a.click();
+};
+
+document.getElementById('b1').onclick = async (e) => {
+  e.target.disabled = true;
+  try {
+    const M = 'Marqo/marqo-fashionSigLIP';
+    const cats = [], labels = [];
+    for (const [c, list] of Object.entries(LABELS)) for (const l of list) { cats.push(c); labels.push(l); }
+    log('Lade Tokenizer und Text-Modell …');
+    const tok = await TF.AutoTokenizer.from_pretrained(M);
+    const model = await TF.SiglipTextModel.from_pretrained(M, {
+      dtype: 'q8',
+      progress_callback: (p) => { if (p.status === 'progress' && p.total) log(`Lade ${p.file}: ${Math.round(p.progress)} %`); },
+    });
+    log('Berechne Text-Vektoren …');
+    const { text_embeds } = await model(tok(labels.map((l) => TEMPLATE.replace('{label}', l)), { padding: 'max_length', truncation: true }));
+    const emb = text_embeds.normalize().tolist();
+    const dim = emb[0].length;
+    // int8 + Skalierung je Vektor (kleine Datei, Genauigkeit reicht)
+    const q = new Int8Array(emb.length * dim), scales = [];
+    emb.forEach((v, i) => {
+      const m = Math.max(...v.map(Math.abs));
+      scales.push(+(m / 127).toPrecision(6));
+      v.forEach((x, j) => { q[i * dim + j] = Math.round(x / m * 127); });
+    });
+    let s = ''; const u = new Uint8Array(q.buffer);
+    for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]);
+    const json = JSON.stringify({ model: M, license: 'Apache-2.0', template: TEMPLATE, dim, cats, labels, scales, emb: btoa(s) });
+    download('labels.json', json);
+    log(`Fertig: ${labels.length} Begriffe × ${dim} Werte. labels.json wurde heruntergeladen → nach js/labels.json kopieren.`);
+  } catch (err) { log('Fehler: ' + (err.stack || err)); }
+  e.target.disabled = false;
+};
+
+document.getElementById('b2').onclick = async (e) => {
+  e.target.disabled = true;
+  try {
+    const tok = await TF.AutoTokenizer.from_pretrained('Xenova/clipseg-rd64-refined');
+    const texts = [...SEG_GARMENTS.map((g) => g[1]), ...SEG_NEGATIVE];
+    const t = tok(texts, { padding: true, truncation: true });
+    const fmt = (a) => `[${Array.from(a, Number).join(', ')}]`;
+    log(`// Begriffe: ${texts.join(' | ')}\nconst SEG_TOKENS = {\n  dims: [${t.input_ids.dims.join(', ')}],\n  input_ids: ${fmt(t.input_ids.data)},\n  attention_mask: ${fmt(t.attention_mask.data)},\n};\n\n→ in js/ai.js ersetzen.`);
+  } catch (err) { log('Fehler: ' + (err.stack || err)); }
+  e.target.disabled = false;
+};
+</script>
+</body>
+</html>
