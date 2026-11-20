@@ -5,6 +5,8 @@ import {
 } from './image.js';
 import { analyzeItem, ANALYSIS_VERSION } from './analyze.js';
 import { PATTERNS, STYLES, patternName } from './attrs.js';
+import { suggest, weatherNeeds, weatherTip, OCCASIONS } from './suggest.js';
+import * as weather from './weather.js';
 import * as sync from './sync.js';
 
 // Deutsche Bezeichnungen für die erkannten Kleidungsarten (Schlüssel = Label in labels.json)
@@ -118,9 +120,9 @@ function countByCategory(items) {
 }
 
 /* ---------- Navigation ---------- */
-const VIEWS = ['wardrobe', 'studio', 'outfits'];
+const VIEWS = ['today', 'wardrobe', 'studio', 'outfits'];
 function show(view) {
-  if (!VIEWS.includes(view)) view = 'wardrobe';
+  if (!VIEWS.includes(view)) view = 'today';
   state.view = view;
   for (const v of VIEWS) $('#view-' + v).hidden = v !== view;
   document.querySelectorAll('.nav-btn').forEach((b) => {
@@ -133,7 +135,8 @@ function show(view) {
 }
 
 function render() {
-  if (state.view === 'wardrobe') renderWardrobe();
+  if (state.view === 'today') renderToday();
+  else if (state.view === 'wardrobe') renderWardrobe();
   else if (state.view === 'studio') renderStudio();
   else renderOutfits();
 }
@@ -626,7 +629,10 @@ function openItemSheet(item) {
       <button class="btn btn-ghost" id="item-back">${item.back ? 'Rückseite ersetzen' : 'Rückseite hinzufügen'}</button>
       <button class="btn btn-ghost" id="item-back-remove"${item.back ? '' : ' hidden'}>Rückseite entfernen</button>
     </div>
-    ${usedIn ? `<p class="note">Kommt in ${plural(usedIn, 'Outfit', 'Outfits')} vor.</p>` : ''}
+    ${usedIn || item.wears?.length ? `<p class="note">${[
+      usedIn ? `Kommt in ${plural(usedIn, 'Outfit', 'Outfits')} vor.` : '',
+      item.wears?.length ? `Zuletzt getragen: ${new Date(item.wears[item.wears.length - 1] + 'T12:00:00').toLocaleDateString('de-CH', { weekday: 'short', day: 'numeric', month: 'numeric' })} (${plural(item.wears.length, 'Mal', 'Mal')} in letzter Zeit).` : '',
+    ].filter(Boolean).join(' ')}</p>` : ''}
     ${itemFieldsHtml(d)}
     <button class="btn btn-ghost btn-block" id="item-reanalyze" style="margin-bottom:14px">Farben, Muster & Style neu erkennen</button>
     <div class="stack">
@@ -779,7 +785,8 @@ function maxZ() {
   return state.studio.pieces.reduce((m, p) => Math.max(m, p.z), 0);
 }
 
-function addToStudio(item, { select = true } = {}) {
+/** Standard-Platz eines Teils auf der Fläche (weicht bereits belegten Plätzen aus). */
+function placePiece(item, pieces) {
   const { slot } = catById(item.category);
   const aspect = item.aspect || 1;
   let w = slot.w;
@@ -787,10 +794,21 @@ function addToStudio(item, { select = true } = {}) {
   if (heightPct > slot.maxH) w = (slot.maxH * STAGE_RATIO) / aspect;
   let { x, y } = slot;
   let guard = 0;
-  while (state.studio.pieces.some((p) => Math.abs(p.x - x) < 3 && Math.abs(p.y - y) < 3) && guard++ < 10) {
+  while (pieces.some((p) => Math.abs(p.x - x) < 3 && Math.abs(p.y - y) < 3) && guard++ < 10) {
     x += 6; y += 5;
   }
-  const piece = { pid: db.uid(), itemId: item.id, x: clamp(x, 5, 95), y: clamp(y, 5, 95), w: clamp(w, 8, 90), z: Math.max(slot.z, maxZ() + 1) };
+  return { pid: db.uid(), itemId: item.id, x: clamp(x, 5, 95), y: clamp(y, 5, 95), w: clamp(w, 8, 90), z: slot.z };
+}
+/** Fertig angeordnete Fläche für eine Liste von Teilen (Vorschläge, Zufall). */
+function autoLayout(items) {
+  const pieces = [];
+  for (const it of items) pieces.push(placePiece(it, pieces));
+  return pieces;
+}
+
+function addToStudio(item, { select = true } = {}) {
+  const piece = placePiece(item, state.studio.pieces);
+  piece.z = Math.max(piece.z, maxZ() + 1);
   state.studio.pieces.push(piece);
   if (select) state.selected = piece.pid;
   saveDraft();
@@ -813,24 +831,12 @@ function setToolsEnabled(on) {
   document.querySelectorAll('#piece-tools .tool').forEach((b) => { b.disabled = !on; });
 }
 
+/** Zufall im Studio: ein passendes Outfit (Wetter von heute, Farben, Abwechslung) mit etwas Zufall. */
 function shuffleOutfit() {
-  const by = {};
-  for (const it of state.items) (by[it.category] ||= []).push(it);
-  const pick = (arr) => (arr?.length ? arr[Math.floor(Math.random() * arr.length)] : null);
-  const chosen = [];
-  const canSeparates = by.oberteile?.length || by.hosen?.length;
-  if (by.kleider?.length && (!canSeparates || Math.random() < 0.3)) chosen.push(pick(by.kleider));
-  else chosen.push(pick(by.oberteile), pick(by.hosen));
-  if (Math.random() < 0.6) chosen.push(pick(by.jacken));
-  chosen.push(pick(by.schuhe));
-  if (Math.random() < 0.5) chosen.push(pick(by.accessoires));
-  const final = chosen.filter(Boolean);
-  if (!final.length) { toast('Füge erst Oberteile, Hosen oder Schuhe hinzu'); return; }
-  state.studio = { id: null, name: '', pieces: [] };
-  final.forEach((it) => {
-    const p = addToStudio(it, { select: false });
-    p.z = catById(it.category).slot.z;
-  });
+  const res = suggest(state.items, { day: forecastFor(0), date: isoDate(0), seed: Math.floor(Math.random() * 1e9), count: 3 });
+  const pickOne = res.outfits[Math.floor(Math.random() * res.outfits.length)];
+  if (!pickOne) { toast(res.problem || 'Füge erst Oberteile, Hosen oder Schuhe hinzu'); return; }
+  state.studio = { id: null, name: '', pieces: autoLayout(pickOne.items) };
   state.selected = null;
   saveDraft();
   renderStudio();
@@ -1025,11 +1031,17 @@ function openOutfitSheet(outfit) {
     <div class="sheet-head"><h2>${esc(outfit.name)}</h2><button class="icon-btn" data-close aria-label="Schließen">${ICON.close}</button></div>
     <div class="sheet-preview outfit"><div class="stage" id="outfit-stage"></div></div>
     <div class="stack">
+      <button class="btn btn-ghost btn-block" id="outfit-worn">Heute getragen</button>
       <button class="btn btn-primary btn-block" id="outfit-edit">Im Studio bearbeiten</button>
       <button class="btn btn-danger" id="outfit-delete">Outfit löschen</button>
     </div>
   </div>`);
   renderStage($('#outfit-stage', sheet), outfit.pieces, false);
+  const wornBtn = $('#outfit-worn', sheet);
+  const outfitItems = () => outfit.pieces.map((p) => itemById(p.itemId)).filter(Boolean);
+  const refreshWorn = () => { wornBtn.textContent = isWorn(outfitItems(), isoDate(0)) ? 'Heute getragen ✓' : 'Heute getragen'; };
+  refreshWorn();
+  wornBtn.onclick = async () => { await toggleWorn(outfitItems(), isoDate(0)); refreshWorn(); };
   $('#outfit-edit', sheet).onclick = () => {
     state.studio = { id: outfit.id, name: outfit.name, pieces: structuredClone(outfit.pieces) };
     state.selected = null;
@@ -1047,6 +1059,325 @@ function openOutfitSheet(outfit) {
     render();
     toast('Outfit gelöscht');
   };
+}
+
+/* ---------- Heute: Wetter + Outfit-Vorschläge ---------- */
+/** Datum als 'YYYY-MM-DD' in lokaler Zeit (offset: 0 = heute, 1 = morgen). */
+function isoDate(offset = 0) {
+  const d = new Date();
+  d.setDate(d.getDate() + offset);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+const LS_TODAY = 'heute-filter';
+const savedFilter = (() => { try { return JSON.parse(localStorage.getItem(LS_TODAY) || '{}'); } catch { return {}; } })();
+state.today = {
+  day: 0, style: savedFilter.style || null, occasion: savedFilter.occasion || null,
+  pinned: [], seed: Math.floor(Math.random() * 1e9), lastShown: [],
+  forecast: null, weatherState: 'idle', weatherError: '', result: null,
+};
+function saveFilter() {
+  try { localStorage.setItem(LS_TODAY, JSON.stringify({ style: state.today.style, occasion: state.today.occasion })); } catch { /* egal */ }
+}
+/** Vorhersage für den gewählten Tag (null ohne Ort oder ohne Daten). */
+function forecastFor(offset) {
+  const days = state.today.forecast;
+  if (!days) return null;
+  return days.find((d) => d.date === isoDate(offset)) || days[offset] || null;
+}
+
+async function loadWeather({ force = false } = {}) {
+  const loc = weather.getLocation();
+  if (!loc) { state.today.weatherState = 'none'; state.today.forecast = null; renderWeather(); return; }
+  state.today.weatherState = 'loading';
+  renderWeather();
+  try {
+    state.today.forecast = await weather.getForecast(loc, { force });
+    state.today.weatherState = 'ok';
+  } catch (err) {
+    console.warn('Wetter', err);
+    state.today.weatherState = 'error';
+    state.today.weatherError = err.message;
+  }
+  state.today.result = null;
+  if (state.view === 'today') renderToday();
+}
+
+const fmtTemp = (t) => `${Math.round(t)}°`;
+function renderWeather() {
+  const el = $('#weather-card');
+  if (!el) return;
+  const t = state.today;
+  const loc = weather.getLocation();
+  if (t.weatherState === 'none' || !loc) {
+    el.innerHTML = `<div class="weather-main"><span class="weather-icon">🌤️</span><div>
+        <div class="weather-temp">Wetter einrichten</div>
+        <div class="weather-text">Mit deinem Ort passen die Vorschläge zum Wetter.</div>
+      </div></div>
+      <button class="btn btn-ghost" data-action="weather-location">Ort festlegen</button>`;
+    return;
+  }
+  if (t.weatherState === 'loading' && !t.forecast) {
+    el.innerHTML = `<div class="weather-main"><span class="weather-icon">⏳</span><div><div class="weather-text">Wetter für ${esc(loc.name)} wird geladen …</div></div></div>`;
+    return;
+  }
+  const day = forecastFor(t.day);
+  if (!day) {
+    el.innerHTML = `<div class="weather-main"><span class="weather-icon">⚠️</span><div>
+        <div class="weather-temp">Wetter nicht verfügbar</div>
+        <div class="weather-text">${esc(t.weatherError || 'Keine Daten')} – Vorschläge ohne Wetter.</div>
+      </div></div>
+      <div class="row weather-actions"><button class="btn btn-ghost" data-action="weather-retry">Nochmal</button><button class="btn btn-ghost" data-action="weather-location">${esc(loc.name)}</button></div>`;
+    return;
+  }
+  const d = weather.describe(day.code);
+  const needs = weatherNeeds(day);
+  el.innerHTML = `<div class="weather-main"><span class="weather-icon" aria-hidden="true">${d.icon}</span><div>
+      <div class="weather-temp">${fmtTemp(day.tMax)} <span>/ ${fmtTemp(day.tMin)}</span></div>
+      <div class="weather-text">${esc(d.text)} · gefühlt ${fmtTemp(needs.feels)} · Regen ${Math.round(day.rainProb)} %${day.wind >= 30 ? ` · Wind ${Math.round(day.wind)} km/h` : ''}</div>
+      <div class="weather-tip">${esc(weatherTip(needs))}</div>
+    </div></div>
+    <button class="btn btn-ghost weather-loc" data-action="weather-location" title="Ort ändern">
+      <svg viewBox="0 0 24 24"><path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11Z"/><circle cx="12" cy="10" r="2.3"/></svg>${esc(loc.name)}
+    </button>`;
+}
+
+function renderToday() {
+  const t = state.today;
+  const dayDate = new Date();
+  dayDate.setDate(dayDate.getDate() + t.day);
+  $('#today-title').textContent = t.day ? 'Morgen' : 'Heute';
+  $('#today-date').textContent = dayDate.toLocaleDateString('de-CH', { weekday: 'long', day: 'numeric', month: 'long' });
+  $('#today-day').querySelectorAll('[data-day]').forEach((b) => b.setAttribute('aria-pressed', String(+b.dataset.day === t.day)));
+  renderWeather();
+
+  const chipRow = (el, list, current) => {
+    el.innerHTML = [{ id: '', name: 'Alle' }, ...list].map((o) => `<button class="chip" data-id="${o.id}" aria-selected="${(current || '') === o.id}">${esc(o.name)}</button>`).join('');
+  };
+  chipRow($('#today-occasion'), OCCASIONS, t.occasion);
+  chipRow($('#today-style'), STYLES, t.style);
+
+  // Fixierte Teile (nur solche, die es noch gibt)
+  t.pinned = t.pinned.filter((id) => itemById(id));
+  const pinnedEl = $('#today-pinned');
+  pinnedEl.hidden = !t.pinned.length;
+  pinnedEl.innerHTML = t.pinned.length
+    ? `<span class="filter-label">Fixiert</span>${t.pinned.map((id) => `<button class="chip chip-sm pin-chip" data-unpin="${id}">${esc(itemById(id).name)} ✕</button>`).join('')}`
+    : '';
+
+  if (t.result && t.resultSig !== itemsSig()) t.result = null; // Schrank hat sich geändert
+  if (!t.result) {
+    t.resultSig = itemsSig();
+    t.result = suggest(state.items, {
+      day: forecastFor(t.day), date: isoDate(t.day), style: t.style, occasion: t.occasion,
+      pinned: t.pinned, seed: t.seed, count: 3, avoid: t.lastShown,
+    });
+  }
+  const { outfits, problem } = t.result;
+  const grid = $('#today-grid');
+  const empty = $('#today-empty');
+  empty.hidden = !!outfits.length;
+  $('#today-reroll').hidden = !outfits.length;
+  if (!outfits.length) {
+    grid.innerHTML = '';
+    empty.innerHTML = `<h2>Noch kein Vorschlag</h2><p>${esc(problem)}</p>
+      ${state.items.length ? '' : '<button class="btn btn-primary" data-action="add-item">Teil hinzufügen</button>'}
+      ${t.pinned.length || t.style || t.occasion ? '<button class="btn btn-ghost" data-action="today-reset">Filter zurücksetzen</button>' : ''}`;
+    return;
+  }
+  grid.innerHTML = outfits.map((o, i) => {
+    const worn = isWorn(o.items, isoDate(0));
+    return `<div class="card outfit-card today-card" data-idx="${i}">
+      <div class="stage"></div>
+      <div class="card-meta" style="padding-top:12px">
+        <div class="card-title">Vorschlag ${i + 1}</div>
+        <div class="card-sub card-sub-text">${esc(o.items.map((it) => it.name).join(' · '))}</div>
+        <div class="today-card-actions">
+          ${t.day === 0 ? `<button class="btn btn-ghost btn-sm" data-act="worn" aria-pressed="${worn}">${worn ? 'Getragen ✓' : 'Heute getragen'}</button>` : ''}
+          <button class="btn btn-ghost btn-sm" data-act="save">Speichern</button>
+          <button class="btn btn-ghost btn-sm" data-act="studio">Studio</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+  grid.querySelectorAll('.today-card').forEach((card) => {
+    const o = outfits[+card.dataset.idx];
+    const stage = $('.stage', card);
+    // pid = Item-id, damit ein Antippen das Teil fixieren kann
+    renderStage(stage, autoLayout(o.items).map((p) => ({ ...p, pid: p.itemId })), false);
+    stage.querySelectorAll('.piece').forEach((p) => p.classList.toggle('pinned', t.pinned.includes(p.dataset.pid)));
+  });
+}
+
+/** Neue Vorschläge berechnen (z. B. nach Filterwechsel). reroll: neue Zufallsauswahl, zuletzt gezeigte Oberteile meiden. */
+function refreshSuggestions({ reroll = false } = {}) {
+  const t = state.today;
+  if (reroll) {
+    t.lastShown = (t.result?.outfits || []).map((o) => o.items[0].id);
+    t.seed = Math.floor(Math.random() * 1e9);
+  }
+  t.result = null;
+  renderToday();
+}
+
+const itemsSig = () => `${state.items.length}:${state.items.reduce((m, i) => Math.max(m, i.updatedAt || 0), 0)}`;
+const isWorn = (items, date) => items.length > 0 && items.every((it) => it.wears?.includes(date));
+/** Markiert alle Teile als an diesem Tag getragen – oder nimmt die Markierung zurück. */
+async function toggleWorn(items, date) {
+  const undo = isWorn(items, date);
+  for (const it of items) {
+    const set = new Set(it.wears || []);
+    if (undo) set.delete(date); else set.add(date);
+    it.wears = [...set].sort().slice(-30);
+    it.updatedAt = Date.now();
+    await db.put('items', it);
+    sync.markChanged('item', it.id, 'put');
+  }
+  // Die angezeigten Vorschläge bleiben stehen (sonst verschwände das gerade getragene Outfit)
+  if (state.today.result) state.today.resultSig = itemsSig();
+  toast(undo ? 'Markierung entfernt' : 'Als heute getragen gespeichert');
+  return !undo;
+}
+
+async function saveSuggestion(items) {
+  const pieces = autoLayout(items);
+  const outfit = { id: db.uid(), name: suggestOutfitName(pieces), pieces, createdAt: Date.now(), updatedAt: Date.now() };
+  await db.put('outfits', outfit);
+  sync.markChanged('outfit', outfit.id, 'put');
+  state.outfits = [outfit, ...state.outfits];
+  toast(`„${outfit.name}“ gespeichert`);
+}
+
+function bindToday() {
+  $('#today-day').onclick = (e) => {
+    const b = e.target.closest('[data-day]');
+    if (!b || +b.dataset.day === state.today.day) return;
+    state.today.day = +b.dataset.day;
+    refreshSuggestions();
+  };
+  $('#today-occasion').onclick = (e) => {
+    const b = e.target.closest('.chip');
+    if (!b) return;
+    state.today.occasion = b.dataset.id || null;
+    saveFilter();
+    refreshSuggestions();
+  };
+  $('#today-style').onclick = (e) => {
+    const b = e.target.closest('.chip');
+    if (!b) return;
+    state.today.style = b.dataset.id || null;
+    saveFilter();
+    refreshSuggestions();
+  };
+  $('#today-pinned').onclick = (e) => {
+    const b = e.target.closest('[data-unpin]');
+    if (!b) return;
+    state.today.pinned = state.today.pinned.filter((id) => id !== b.dataset.unpin);
+    refreshSuggestions();
+  };
+  $('#today-reroll').onclick = () => refreshSuggestions({ reroll: true });
+  $('#today-grid').onclick = async (e) => {
+    const card = e.target.closest('.today-card');
+    if (!card) return;
+    const o = state.today.result?.outfits[+card.dataset.idx];
+    if (!o) return;
+    const piece = e.target.closest('.piece');
+    if (piece) {
+      // Teil fixieren / lösen. Pro Kategorie nur ein fixiertes Teil.
+      const t = state.today;
+      const id = piece.dataset.pid;
+      const cat = itemById(id)?.category;
+      t.pinned = t.pinned.includes(id) ? t.pinned.filter((x) => x !== id) : [...t.pinned.filter((x) => itemById(x)?.category !== cat), id];
+      refreshSuggestions();
+      return;
+    }
+    const act = e.target.closest('[data-act]')?.dataset.act;
+    if (act === 'worn') {
+      const btn = e.target.closest('[data-act]');
+      btn.disabled = true;
+      const worn = await toggleWorn(o.items, isoDate(0));
+      btn.disabled = false;
+      btn.textContent = worn ? 'Getragen ✓' : 'Heute getragen';
+      btn.setAttribute('aria-pressed', String(worn));
+    } else if (act === 'save') {
+      const btn = e.target.closest('[data-act]');
+      btn.disabled = true;
+      await saveSuggestion(o.items);
+      btn.textContent = 'Gespeichert';
+    } else if (act === 'studio') {
+      state.studio = { id: null, name: '', pieces: autoLayout(o.items) };
+      state.selected = null;
+      saveDraft();
+      show('studio');
+    }
+  };
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest('[data-action]')?.dataset.action;
+    if (a === 'weather-location') openLocationSheet();
+    if (a === 'weather-retry') loadWeather({ force: true });
+    if (a === 'today-reset') {
+      Object.assign(state.today, { style: null, occasion: null, pinned: [] });
+      saveFilter();
+      refreshSuggestions();
+    }
+  });
+}
+
+/** Ort für das Wetter festlegen: Suche nach Name oder aktueller Standort. */
+function openLocationSheet() {
+  const loc = weather.getLocation();
+  openSheet(`<div class="sheet-inner">
+    <div class="sheet-head"><h2>Ort fürs Wetter</h2><button class="icon-btn" data-close aria-label="Schließen">${ICON.close}</button></div>
+    <p class="note">Für die Vorhersage werden nur die (auf ca. 1 km gerundeten) Koordinaten an Open-Meteo geschickt. Der Ort bleibt auf diesem Gerät.</p>
+    <form id="loc-form" class="row" style="margin-bottom:12px" novalidate>
+      <input class="input" id="loc-q" placeholder="Ort, z. B. Zürich" autocomplete="off" value="${loc?.source === 'city' ? esc(loc.name) : ''}">
+      <button class="btn btn-primary" type="submit" style="flex:none">Suchen</button>
+    </form>
+    <div class="loc-results" id="loc-results"></div>
+    <button class="btn btn-ghost btn-block" id="loc-gps" style="margin-bottom:10px">Aktuellen Standort verwenden</button>
+    ${loc ? '<button class="btn btn-danger btn-block" id="loc-clear">Wetter ausschalten</button>' : ''}
+  </div>`);
+  const results = $('#loc-results', sheet);
+  const choose = async (l) => {
+    weather.setLocation(l);
+    closeSheet();
+    await loadWeather({ force: true });
+  };
+  $('#loc-form', sheet).onsubmit = async (e) => {
+    e.preventDefault();
+    const q = $('#loc-q', sheet).value.trim();
+    if (q.length < 2) return;
+    results.innerHTML = '<p class="note">Suche …</p>';
+    try {
+      const list = await weather.searchCity(q);
+      results.innerHTML = list.length
+        ? list.map((r, i) => `<button class="loc-result" data-i="${i}"><b>${esc(r.name)}</b><span>${esc(r.detail)}</span></button>`).join('')
+        : '<p class="note">Kein Ort gefunden.</p>';
+      results.onclick = (ev) => {
+        const b = ev.target.closest('[data-i]');
+        if (b) { const r = list[+b.dataset.i]; choose({ name: r.name, lat: r.lat, lon: r.lon, source: 'city' }); }
+      };
+    } catch (err) {
+      results.innerHTML = `<p class="form-error">${esc(err.message)}</p>`;
+    }
+  };
+  $('#loc-gps', sheet).onclick = async (e) => {
+    const btn = e.target;
+    btn.disabled = true;
+    btn.textContent = 'Standort wird ermittelt …';
+    try {
+      const p = await weather.currentPosition();
+      await choose({ name: 'Mein Standort', ...p, source: 'gps' });
+    } catch (err) {
+      toast(err.message);
+      btn.disabled = false;
+      btn.textContent = 'Aktuellen Standort verwenden';
+    }
+  };
+  $('#loc-clear', sheet)?.addEventListener('click', async () => {
+    weather.setLocation(null);
+    closeSheet();
+    await loadWeather();
+  });
 }
 
 /* ---------- Einstellungen, Konto & Backup ---------- */
@@ -1453,6 +1784,21 @@ async function init() {
     sheet.innerHTML = '';
   });
   bindStage();
+  bindToday();
+  // Wetter laden; bei "Mein Standort" vorher still den aktuellen Standort holen (nur wenn schon erlaubt)
+  (async () => {
+    const loc = weather.getLocation();
+    if (loc?.source === 'gps') {
+      try {
+        const perm = await navigator.permissions?.query({ name: 'geolocation' });
+        if (perm?.state === 'granted') {
+          const p = await weather.currentPosition();
+          if (p.lat !== loc.lat || p.lon !== loc.lon) weather.setLocation({ ...loc, ...p });
+        }
+      } catch { /* alter Standort bleibt */ }
+    }
+    await loadWeather();
+  })();
 
   window.addEventListener('hashchange', () => {
     const v = location.hash.slice(1);
@@ -1462,7 +1808,7 @@ async function init() {
   const authRedirect = sync.available() ? sync.readAuthRedirect() : null;
   if (authRedirect) history.replaceState(null, '', location.pathname + location.search); // Tokens aus der Adresse entfernen
 
-  show(location.hash.slice(1) || 'wardrobe');
+  show(location.hash.slice(1) || 'today');
   db.requestPersistence();
   sync.init().catch((err) => console.warn('Sync-Start', err));
   setTimeout(backfillAnalysis, 2500); // Bestand nachanalysieren, sobald die App bereit ist

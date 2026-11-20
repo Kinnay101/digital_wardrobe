@@ -3,13 +3,13 @@
 // - vendor/ (Bibliothek, Rechen-Engine): "Cache zuerst" – feste Versionen, ändern sich nie.
 // - models/: nicht anfassen – transformers.js speichert die Modelle selbst im Cache "transformers-cache".
 //   (Würden wir sie hier auch speichern, lägen ~135 MB doppelt auf dem Gerät.)
-const APP_CACHE = 'kleiderschrank-v7';
+const APP_CACHE = 'kleiderschrank-v8';
 const VENDOR_CACHE = 'kleiderschrank-vendor-v1'; // bei neuer Bibliotheks-Version hochzählen
 const KEEP = [APP_CACHE, VENDOR_CACHE, 'transformers-cache'];
 const SHELL = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
   'js/app.js', 'js/db.js', 'js/image.js', 'js/ai.js', 'js/labels.json',
-  'js/analyze.js', 'js/attrs.js', 'js/attrs.json',
+  'js/analyze.js', 'js/attrs.js', 'js/attrs.json', 'js/suggest.js', 'js/weather.js',
   'js/sync.js', 'js/crypto.js', 'js/config.js',
   'icons/icon.svg', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
