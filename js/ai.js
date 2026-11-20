@@ -113,30 +113,37 @@ export async function segmentMask(blob, onLoadProgress) {
 }
 
 /* ---------- Kategorie ---------- */
+const fetchJson = (name) => fetch(new URL(name, import.meta.url)).then((r) => r.json());
+/** Vorberechnete Text-Vektoren entpacken (int8 + Skalierung je Vektor). */
+function unpackVectors(d) {
+  const raw = Uint8Array.from(atob(d.emb), (c) => c.charCodeAt(0));
+  const q = new Int8Array(raw.buffer);
+  return d.scales.map((s, i) => Float32Array.from(q.subarray(i * d.dim, (i + 1) * d.dim), (v) => v * s));
+}
+// Merkmal-Vektoren (Muster, Style, Saison, Marke) – klein, ohne Bild-Modell ladbar
+let attrPromise;
+function loadAttrs() {
+  attrPromise ??= fetchJson('./attrs.json').then((attrs) => {
+    const vecs = unpackVectors(attrs);
+    let k = 0;
+    const groups = {};
+    for (const [g, ids] of Object.entries(attrs.groups)) groups[g] = ids.map((id) => ({ id, vec: vecs[k++] }));
+    return groups;
+  }).catch((err) => { attrPromise = null; throw err; });
+  return attrPromise;
+}
+
 let clipPromise;
 function loadClip() {
   clipPromise ??= (async () => {
     const TF = await loadTf();
-    const json = (name) => fetch(new URL(name, import.meta.url)).then((r) => r.json());
-    const [processor, model, labels, attrs] = await Promise.all([
+    const [processor, model, labels] = await Promise.all([
       TF.AutoProcessor.from_pretrained(CLIP),
       // q8 auf WASM: im Test genauso treffsicher wie größere Varianten; WebGPU brachte hier keinen Vorteil
       TF.SiglipVisionModel.from_pretrained(CLIP, { dtype: 'q8', device: 'wasm', progress_callback: onProgress }),
-      json('./labels.json'),
-      json('./attrs.json'),
+      fetchJson('./labels.json'),
     ]);
-    // Text-Vektoren entpacken (int8 + Skalierung je Vektor)
-    const unpack = (d) => {
-      const raw = Uint8Array.from(atob(d.emb), (c) => c.charCodeAt(0));
-      const q = new Int8Array(raw.buffer);
-      return d.scales.map((s, i) => Float32Array.from(q.subarray(i * d.dim, (i + 1) * d.dim), (v) => v * s));
-    };
-    const emb = unpack(labels);
-    const attrVecs = unpack(attrs);
-    let k = 0;
-    const attrGroups = {};
-    for (const [g, ids] of Object.entries(attrs.groups)) attrGroups[g] = ids.map((id) => ({ id, vec: attrVecs[k++] }));
-    return { TF, processor, model, cats: labels.cats, labels: labels.labels, emb, attrGroups };
+    return { TF, processor, model, cats: labels.cats, labels: labels.labels, emb: unpackVectors(labels) };
   })().catch((err) => { clipPromise = null; throw err; });
   return clipPromise;
 }
@@ -227,7 +234,7 @@ export async function classify(blob, onLoadProgress) {
  * Funktioniert auch mit gespeicherten Vektoren, ohne das Bild-Modell erneut laufen zu lassen.
  */
 export async function scoreAttrs(embedding) {
-  const { attrGroups } = await loadClip();
+  const attrGroups = await loadAttrs();
   const out = {};
   for (const [g, classes] of Object.entries(attrGroups)) {
     const p = softmax(classes.map((c) => 100 * dot(c.vec, embedding)));

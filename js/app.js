@@ -57,12 +57,49 @@ function toast(msg) {
   toastTimer = setTimeout(() => t.classList.remove('show'), 2800);
 }
 
+/* ---------- Als App installieren ----------
+   Chrome und Edge (PC, Android) melden über "beforeinstallprompt", dass die Seite installierbar ist.
+   Wir fangen das ab und zeigen einen eigenen Knopf. Safari (iPhone) kennt das nicht: dort Teilen → Zum Home-Bildschirm. */
+let installPrompt = null;
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const isIos = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  installPrompt = e;
+  renderInstall();
+});
+window.addEventListener('appinstalled', () => {
+  installPrompt = null;
+  renderInstall();
+  toast('App installiert – du findest sie im Startmenü');
+});
+function renderInstall() {
+  const btn = document.getElementById('btn-install');
+  if (btn) btn.hidden = !installPrompt || isStandalone();
+}
+async function installApp() {
+  if (!installPrompt) return;
+  installPrompt.prompt();
+  const { outcome } = await installPrompt.userChoice;
+  if (outcome === 'accepted') installPrompt = null;
+  renderInstall();
+}
+function installHtml() {
+  if (isStandalone()) return '';
+  let body;
+  if (installPrompt) body = '<p class="note">Installiere den Schrank als eigenes Programm: eigenes Fenster, Eintrag im Startmenü bzw. auf dem Home-Bildschirm, funktioniert auch offline.</p><button class="btn btn-primary btn-block" id="do-install">Als App installieren</button>';
+  else if (isIos()) body = '<p class="note">Auf dem iPhone: in Safari unten auf <b>Teilen</b> tippen, dann <b>„Zum Home-Bildschirm“</b>.</p>';
+  else body = '<p class="note">Am Computer geht das in <b>Chrome</b> oder <b>Edge</b>: Symbol „App installieren“ rechts in der Adressleiste oder Menü ⋮ → „Kleiderschrank installieren“. Firefox kann keine Web-Apps installieren.</p>';
+  return `<h3 class="section-title">Als App nutzen</h3>${body}`;
+}
+
 /* ---------- Zustand ---------- */
 const state = {
   items: [],
   outfits: [],
   view: 'wardrobe',
   wardrobeFilter: 'alle',
+  wardrobeBrand: 'alle', // Marke (klein geschrieben) oder 'alle'
   studioFilter: 'alle',
   studio: { id: null, name: '', pieces: [] },
   selected: null, // pid des ausgewählten Teils im Studio
@@ -162,9 +199,13 @@ function renderWardrobeCount() {
 }
 
 function renderWardrobe() {
-  const counts = countByCategory(state.items);
-  if (state.wardrobeFilter !== 'alle' && !counts[state.wardrobeFilter]) state.wardrobeFilter = 'alle';
   const has = state.items.length > 0;
+  // Marke zuerst filtern, die Kategorie-Zahlen beziehen sich dann auf diese Marke
+  const brands = knownBrands();
+  if (state.wardrobeBrand !== 'alle' && !brands.some((b) => b.name.toLowerCase() === state.wardrobeBrand)) state.wardrobeBrand = 'alle';
+  const byBrand = state.wardrobeBrand === 'alle' ? state.items : state.items.filter((i) => i.brand?.toLowerCase() === state.wardrobeBrand);
+  const counts = countByCategory(byBrand);
+  if (state.wardrobeFilter !== 'alle' && !counts[state.wardrobeFilter]) state.wardrobeFilter = 'alle';
 
   renderWardrobeCount();
   $('#wardrobe-empty').hidden = has;
@@ -176,16 +217,29 @@ function renderWardrobe() {
     renderWardrobe();
   });
 
-  const list = state.wardrobeFilter === 'alle' ? state.items : state.items.filter((i) => i.category === state.wardrobeFilter);
+  const brandEl = $('#wardrobe-brand');
+  brandEl.hidden = !brands.length;
+  brandEl.innerHTML = brands.length
+    ? [{ key: 'alle', name: 'Alle Marken', n: state.items.length }, ...brands.map((b) => ({ key: b.name.toLowerCase(), name: b.name, n: b.n }))]
+      .map((b) => `<button class="chip" data-brand="${esc(b.key)}" aria-selected="${b.key === state.wardrobeBrand}">${esc(b.name)}<span class="n">${b.n}</span></button>`).join('')
+    : '';
+  brandEl.onclick = (e) => {
+    const b = e.target.closest('[data-brand]');
+    if (!b) return;
+    state.wardrobeBrand = b.dataset.brand;
+    renderWardrobe();
+  };
+
+  const list = state.wardrobeFilter === 'alle' ? byBrand : byBrand.filter((i) => i.category === state.wardrobeFilter);
   $('#wardrobe-grid').innerHTML = list.map((it) => {
     const swatches = colorsOf(it).map((c) => `<span class="swatch" style="background:${colorById(c.id).hex}"></span>`).join('');
-    const pattern = it.pattern && it.pattern !== 'uni' ? ` · ${esc(patternName(it.pattern))}` : '';
+    const sub = [it.brand, catById(it.category).name, it.pattern && it.pattern !== 'uni' ? patternName(it.pattern) : ''].filter(Boolean).map(esc).join(' · ');
     return `<button class="card" data-id="${it.id}">
       <div class="card-img"><img class="${it.cutout ? 'sticker' : ''}" src="${urlFor(it)}" alt="" loading="lazy"></div>
       ${it.back ? '<span class="card-badge" title="Mit Rückseite">2 Seiten</span>' : ''}
       <div class="card-meta">
         <div class="card-title">${esc(it.name)}</div>
-        <div class="card-sub"><span class="swatches">${swatches}</span><span class="card-sub-text">${esc(catById(it.category).name)}${pattern}</span></div>
+        <div class="card-sub"><span class="swatches">${swatches}</span><span class="card-sub-text">${sub}</span></div>
       </div>
     </button>`;
   }).join('');
@@ -211,6 +265,32 @@ function defaultName(d) {
   if (c1?.id === d.color && c2 && c2.share >= 0.3) return `${one} in ${colorById(c1.id).name} & ${colorById(c2.id).name}`;
   return `${one} in ${colorById(d.color).name}`;
 }
+/* Marken: frei eintragen; bereits verwendete Marken werden vorgeschlagen (häufigste zuerst) */
+function knownBrands() {
+  const counts = new Map();
+  for (const it of state.items) {
+    if (!it.brand) continue;
+    const key = it.brand.toLowerCase();
+    const cur = counts.get(key) || { name: it.brand, n: 0 };
+    cur.n++;
+    counts.set(key, cur);
+  }
+  return [...counts.values()].sort((a, b) => b.n - a.n || a.name.localeCompare(b.name, 'de'));
+}
+/** Schreibweise vereinheitlichen: "nike " -> "Nike", wenn es "Nike" schon gibt. */
+function canonicalBrand(v) {
+  const s = String(v || '').trim().replace(/\s+/g, ' ');
+  if (!s) return '';
+  return knownBrands().find((b) => b.name.toLowerCase() === s.toLowerCase())?.name || s;
+}
+function brandFieldHtml(d) {
+  const brands = knownBrands();
+  return `<div class="field"><span>Marke <small>optional</small></span>
+      <input class="input" id="f-brand" list="brand-list" value="${esc(d.brand || '')}" placeholder="z. B. Nike" maxlength="40" autocomplete="off" autocapitalize="words">
+      <datalist id="brand-list">${brands.map((b) => `<option value="${esc(b.name)}"></option>`).join('')}</datalist>
+      ${brands.length ? `<div class="cat-picker brand-quick" id="f-brand-quick">${brands.slice(0, 8).map((b) => `<button type="button" class="chip chip-sm" data-brand="${esc(b.name)}" aria-selected="${(d.brand || '').toLowerCase() === b.name.toLowerCase()}">${esc(b.name)}</button>`).join('')}</div>` : ''}
+    </div>`;
+}
 const pct = (v) => `${Math.round(v * 100)} %`;
 function colorBarHtml(colors) {
   return `<div class="color-bar">${colors.map((c) => `<span style="flex:${c.share};background:${colorById(c.id).hex}"></span>`).join('')}</div>
@@ -221,6 +301,7 @@ function itemFieldsHtml(d) {
     <label class="field"><span>Name</span>
       <input class="input" id="f-name" value="${esc(d.name)}" placeholder="${esc(defaultName(d))}" maxlength="60" autocomplete="off">
     </label>
+    ${brandFieldHtml(d)}
     <div class="field"><span>Kategorie</span>
       <div class="cat-picker" id="f-cat">
         ${CATEGORIES.map((c) => `<button type="button" class="chip" data-id="${c.id}" aria-selected="${c.id === d.category}">${esc(c.name)}</button>`).join('')}
@@ -246,6 +327,17 @@ function itemFieldsHtml(d) {
 function bindItemFields(d) {
   const nameEl = $('#f-name', sheet);
   nameEl.oninput = () => { d.name = nameEl.value; };
+  const brandEl = $('#f-brand', sheet);
+  const markBrand = () => sheet.querySelectorAll('#f-brand-quick [data-brand]').forEach((c) => c.setAttribute('aria-selected', c.dataset.brand.toLowerCase() === d.brand.trim().toLowerCase()));
+  brandEl.oninput = () => { d.brand = brandEl.value; markBrand(); };
+  $('#f-brand-quick', sheet)?.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-brand]');
+    if (!b) return;
+    // Nochmal antippen entfernt die Marke wieder
+    d.brand = d.brand.trim().toLowerCase() === b.dataset.brand.toLowerCase() ? '' : b.dataset.brand;
+    brandEl.value = d.brand;
+    markBrand();
+  });
   $('#f-cat', sheet).onclick = (e) => {
     const b = e.target.closest('.chip');
     if (!b) return;
@@ -317,12 +409,14 @@ function draftToItem(d, item) {
     name: d.name.trim() || defaultName(d), category: d.category,
     color: d.color, colors: d.colors, pattern: d.pattern, styles: d.styles,
   });
+  const brand = canonicalBrand(d.brand);
+  if (brand) item.brand = brand; else delete item.brand;
   const r = d.analysisResult;
   if (r) Object.assign(item, { kindLabel: r.kindLabel, patternScores: r.patternScores, styleScores: r.styleScores, warmth: r.warmth, emb: r.emb, analysis: r.analysis });
   return item;
 }
 /** Leerer Entwurf mit Standardwerten. */
-const newDraft = (extra) => ({ name: '', color: 'grau', colors: [{ id: 'grau', share: 1 }], pattern: 'uni', styles: [], ...extra });
+const newDraft = (extra) => ({ name: '', brand: '', color: 'grau', colors: [{ id: 'grau', share: 1 }], pattern: 'uni', styles: [], ...extra });
 
 /* Vorschau mit Umschalter Vorder-/Rückseite */
 function previewHtml(id) {
@@ -615,7 +709,7 @@ function openMultiSheet(pieces) {
 /* ---------- Teil ansehen / bearbeiten ---------- */
 function openItemSheet(item) {
   const d = {
-    name: item.name, category: item.category, color: item.color, colors: colorsOf(item),
+    name: item.name, brand: item.brand || '', category: item.category, color: item.color, colors: colorsOf(item),
     pattern: item.pattern || 'uni', styles: item.styles || [],
     back: item.back || null, backCutout: !!item.backCutout, backChanged: false,
     // Bereits gespeicherte Werte gelten als "von dir gewählt": Neu analysieren schlägt nur vor
@@ -1425,13 +1519,15 @@ function openSettingsSheet() {
       <div class="stat"><b>${state.outfits.length}</b><span>Outfits</span></div>
     </div>
     ${accountHtml()}
-    <h3 class="section-title">Backup</h3>
+    ${installHtml()}
+    <h3 class="section-title" style="margin-top:18px">Backup</h3>
     <p class="note">${sync.status.signedIn ? 'Zusätzlich zum Sync kannst du jederzeit eine Sicherungsdatei erstellen.' : 'Ohne Konto wird alles nur auf diesem Gerät gespeichert. Mit einer Sicherungsdatei kannst du die Daten sichern oder übertragen.'}</p>
     <div class="stack">
       <button class="btn btn-ghost btn-block" id="do-export">Backup exportieren</button>
       <button class="btn btn-ghost btn-block" id="do-import">Backup importieren</button>
     </div>
   </div>`);
+  $('#do-install', sheet)?.addEventListener('click', async () => { await installApp(); if (sheet.open) openSettingsSheet(); });
   $('#do-export', sheet).onclick = exportBackup;
   $('#do-import', sheet).onclick = () => $('#import-input').click();
   $('#acc-signin', sheet)?.addEventListener('click', () => openAuthSheet('signin'));
@@ -1766,6 +1862,8 @@ async function init() {
     if (c) openOutfitSheet(state.outfits.find((o) => o.id === c.dataset.id));
   });
   $('#btn-settings').addEventListener('click', openSettingsSheet);
+  $('#btn-install').addEventListener('click', installApp);
+  renderInstall();
   sheet.addEventListener('click', (e) => {
     if (sheet.dataset.locked) return; // z. B. Wiederherstellungs-Code muss erst bestätigt werden
     if (e.target === sheet || e.target.closest('[data-close]')) closeSheet();
