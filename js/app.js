@@ -1837,7 +1837,7 @@ async function init() {
   state.outfits = outfits.sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt));
   loadDraft();
 
-  document.querySelectorAll('.nav-btn').forEach((b) => b.addEventListener('click', () => show(b.dataset.view)));
+  document.querySelectorAll('.nav-btn[data-view]').forEach((b) => b.addEventListener('click', () => show(b.dataset.view)));
   document.addEventListener('click', (e) => {
     if (e.target.closest('[data-action="add-item"]')) $('#file-input').click();
     const g = e.target.closest('[data-goto]');

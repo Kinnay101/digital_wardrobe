@@ -74,10 +74,15 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   background: none; border: 0; color: var(--muted); font-size: 11px; font-weight: 600; cursor: pointer;
 }
 .nav-btn[aria-current="page"] { color: var(--ink); }
+/* Einstellungen: am Handy kurz "Konto", am Computer unten in der Seitenleiste */
+.nav-btn .lbl-long { display: none; }
 /* Install-Knopf nur in der Seitenleiste am Computer (am Handy steht er unter Einstellungen) */
 .nav-install { display: none; }
 @media (min-width: 860px) {
-  .nav-install:not([hidden]) { display: flex; margin-top: auto; color: var(--ink); background: var(--chip); }
+  .nav-btn .lbl-long { display: inline; }
+  .nav-btn .lbl-short { display: none; }
+  .nav-settings { margin-top: auto; }
+  .nav-install:not([hidden]) { display: flex; color: var(--ink); background: var(--chip); }
 }
 .chips-brand { padding-top: 0; }
 .chips-brand .chip { height: 32px; font-size: 13px; }
