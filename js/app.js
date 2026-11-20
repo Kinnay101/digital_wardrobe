@@ -4,7 +4,7 @@ import {
   COLORS, colorById, primaryColor, blobToDataUrl, dataUrlToBlob,
 } from './image.js';
 import { analyzeItem, ANALYSIS_VERSION } from './analyze.js';
-import { PATTERNS, STYLES, patternName } from './attrs.js';
+import { PATTERNS, STYLES, patternName, styleName } from './attrs.js';
 import { suggest, weatherNeeds, weatherTip, OCCASIONS } from './suggest.js';
 import * as weather from './weather.js';
 import * as sync from './sync.js';
@@ -481,10 +481,12 @@ async function openAddSheet(file) {
     <div class="sheet-head"><h2>Neues Teil</h2><button class="icon-btn" data-close aria-label="Schließen">${ICON.close}</button></div>
     ${previewHtml('add-preview')}
     <label class="toggle-row" id="add-cutout-row" hidden>Hintergrund entfernen <input type="checkbox" id="add-cutout" checked></label>
-    <div class="row back-row" id="add-back-row" hidden>
-      <button class="btn btn-ghost" id="add-back">Rückseite hinzufügen</button>
-      <button class="btn btn-ghost" id="add-back-remove" hidden>Rückseite entfernen</button>
+    <div class="photo-actions" id="add-back-row" hidden>
+      <button class="btn btn-ghost btn-sm" id="add-back">Rückseite hinzufügen</button>
+      <button class="btn btn-ghost btn-sm" id="add-swap" hidden>Seiten tauschen</button>
+      <button class="btn btn-ghost btn-sm" id="add-back-remove" hidden>Rückseite entfernen</button>
     </div>
+    <p class="note" id="add-side-note" hidden>Das erste Foto gilt als Vorderseite. Eine Rückseite ist freiwillig – sinnvoll bei einem Print hinten.</p>
     <button class="btn btn-ghost btn-block" id="add-multi" style="margin-bottom:14px" hidden>Foto mit Person? Teile einzeln herauslösen</button>
     ${itemFieldsHtml(d)}
     <button class="btn btn-primary btn-block" id="add-save" disabled>Wird verarbeitet …</button>
@@ -559,6 +561,7 @@ async function openAddSheet(file) {
   const backBtn = $('#add-back', sheet);
   const backRemove = $('#add-back-remove', sheet);
   $('#add-back-row', sheet).hidden = false;
+  $('#add-side-note', sheet).hidden = false;
   backBtn.onclick = async () => {
     const f = await pickPhoto();
     if (!f || !alive()) return;
@@ -581,12 +584,20 @@ async function openAddSheet(file) {
     }
     backBtn.disabled = false;
     backBtn.textContent = d.backOriginal ? 'Rückseite ersetzen' : 'Rückseite hinzufügen';
-    backRemove.hidden = !d.backOriginal;
+    backRemove.hidden = swapBtn.hidden = !d.backOriginal;
+  };
+  // Erstes Foto = Vorderseite, zweites = Rückseite. Falls verkehrt herum: tauschen.
+  const swapBtn = $('#add-swap', sheet);
+  swapBtn.onclick = () => {
+    [d.original, d.backOriginal] = [d.backOriginal, d.original];
+    [d.cutout, d.backCutout] = [d.backCutout, d.cutout];
+    view.show('front');
+    toast('Vorder- und Rückseite getauscht');
   };
   backRemove.onclick = async () => {
     d.backOriginal = d.backCutout = null;
     view.setHasBack(false);
-    backRemove.hidden = true;
+    backRemove.hidden = swapBtn.hidden = true;
     backBtn.textContent = 'Rückseite hinzufügen';
     await analyze();
   };
@@ -721,33 +732,81 @@ function openMultiSheet(pieces) {
   };
 }
 
-/* ---------- Teil ansehen / bearbeiten ---------- */
+/* ---------- Teil ansehen ---------- */
+/** Hinweis „Kommt in … Outfits vor / Zuletzt getragen“. */
+function itemUsageHtml(item) {
+  const usedIn = state.outfits.filter((o) => o.pieces.some((p) => p.itemId === item.id)).length;
+  const parts = [
+    usedIn ? `Kommt in ${plural(usedIn, 'Outfit', 'Outfits')} vor.` : '',
+    item.wears?.length ? `Zuletzt getragen: ${new Date(item.wears[item.wears.length - 1] + 'T12:00:00').toLocaleDateString('de-CH', { weekday: 'short', day: 'numeric', month: 'numeric' })} (${plural(item.wears.length, 'Mal', 'Mal')} in letzter Zeit).` : '',
+  ].filter(Boolean);
+  return parts.length ? `<p class="note">${parts.join(' ')}</p>` : '';
+}
+function itemInfoHtml(item) {
+  const cat = catById(item.category);
+  const kind = KIND_DE[item.kindLabel];
+  const rows = [
+    ['Marke', item.brand ? esc(item.brand) : ''],
+    ['Kategorie', esc(kind && kind !== cat.one ? `${cat.name} · ${kind}` : cat.name)],
+    ['Farben', colorBarHtml(colorsOf(item))],
+    ['Muster', esc(patternName(item.pattern || 'uni') || 'Uni')],
+    ['Style', esc((item.styles || []).map(styleName).filter(Boolean).join(', ') || '–')],
+    ['Fotos', item.back ? 'Vorder- und Rückseite' : 'Nur Vorderseite'],
+  ].filter(([, v]) => v);
+  return `<dl class="info-list">${rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('')}</dl>`;
+}
+
 function openItemSheet(item) {
+  openSheet(`<div class="sheet-inner">
+    <div class="sheet-head"><h2>${esc(item.name)}</h2><button class="icon-btn" data-close aria-label="Schließen">${ICON.close}</button></div>
+    ${previewHtml('item-preview')}
+    ${itemUsageHtml(item)}
+    ${itemInfoHtml(item)}
+    <div class="stack">
+      <button class="btn btn-primary btn-block" id="item-edit">Bearbeiten</button>
+      <button class="btn btn-ghost btn-block" id="item-studio">Im Studio verwenden</button>
+    </div>
+  </div>`);
+  const view = bindPreview($('#item-preview', sheet), (side) => (side === 'back'
+    ? { blob: item.back, cutout: item.backCutout }
+    : { blob: item.image, cutout: item.cutout }));
+  view.setHasBack(!!item.back);
+  view.show('front');
+  $('#item-edit', sheet).onclick = () => openItemEditSheet(item);
+  $('#item-studio', sheet).onclick = () => {
+    closeSheet();
+    addToStudio(item);
+    show('studio');
+  };
+}
+
+/* ---------- Teil bearbeiten ---------- */
+function openItemEditSheet(item) {
   const d = {
     name: item.name, brand: item.brand || '', category: item.category, color: item.color, colors: colorsOf(item),
     pattern: item.pattern || 'uni', styles: item.styles || [],
+    front: item.image, cutout: !!item.cutout, frontChanged: false,
     back: item.back || null, backCutout: !!item.backCutout, backChanged: false,
     // Bereits gespeicherte Werte gelten als "von dir gewählt": Neu analysieren schlägt nur vor
     catTouched: true,
   };
   const usedIn = state.outfits.filter((o) => o.pieces.some((p) => p.itemId === item.id)).length;
   openSheet(`<div class="sheet-inner">
-    <div class="sheet-head"><h2>${esc(item.name)}</h2><button class="icon-btn" data-close aria-label="Schließen">${ICON.close}</button></div>
+    <div class="sheet-head"><h2>Bearbeiten</h2><button class="icon-btn" data-close aria-label="Schließen">${ICON.close}</button></div>
     ${previewHtml('item-preview')}
-    <div class="row back-row">
-      <button class="btn btn-ghost" id="item-back">${item.back ? 'Rückseite ersetzen' : 'Rückseite hinzufügen'}</button>
-      <button class="btn btn-ghost" id="item-back-remove"${item.back ? '' : ' hidden'}>Rückseite entfernen</button>
+    <div class="photo-actions">
+      <button class="btn btn-ghost btn-sm" id="item-front">Vorderseite ersetzen</button>
+      <button class="btn btn-ghost btn-sm" id="item-back">${item.back ? 'Rückseite ersetzen' : 'Rückseite hinzufügen'}</button>
+      <button class="btn btn-ghost btn-sm" id="item-swap"${item.back ? '' : ' hidden'}>Seiten tauschen</button>
+      <button class="btn btn-ghost btn-sm" id="item-back-remove"${item.back ? '' : ' hidden'}>Rückseite entfernen</button>
     </div>
-    ${usedIn || item.wears?.length ? `<p class="note">${[
-      usedIn ? `Kommt in ${plural(usedIn, 'Outfit', 'Outfits')} vor.` : '',
-      item.wears?.length ? `Zuletzt getragen: ${new Date(item.wears[item.wears.length - 1] + 'T12:00:00').toLocaleDateString('de-CH', { weekday: 'short', day: 'numeric', month: 'numeric' })} (${plural(item.wears.length, 'Mal', 'Mal')} in letzter Zeit).` : '',
-    ].filter(Boolean).join(' ')}</p>` : ''}
+    <p class="note">Die Rückseite ist freiwillig – sinnvoll bei einem Print oder Logo hinten. Bei Schuhen, Mützen oder Schmuck reicht meist ein Foto.</p>
     ${itemFieldsHtml(d)}
     <button class="btn btn-ghost btn-block" id="item-reanalyze" style="margin-bottom:14px">Farben, Muster & Style neu erkennen</button>
     <div class="stack">
-      <button class="btn btn-primary btn-block" id="item-save">Änderungen speichern</button>
+      <button class="btn btn-primary btn-block" id="item-save">Speichern</button>
       <div class="row">
-        <button class="btn btn-ghost" id="item-studio">Im Studio verwenden</button>
+        <button class="btn btn-ghost" id="item-cancel">Abbrechen</button>
         <button class="btn btn-danger" id="item-delete">Löschen</button>
       </div>
     </div>
@@ -755,20 +814,27 @@ function openItemSheet(item) {
   bindItemFields(d);
   const view = bindPreview($('#item-preview', sheet), (side) => (side === 'back'
     ? { blob: d.back, cutout: d.backCutout }
-    : { blob: item.image, cutout: item.cutout }));
+    : { blob: d.front, cutout: d.cutout }));
   view.setHasBack(!!d.back);
   view.show('front');
 
+  const frontBtn = $('#item-front', sheet);
   const backBtn = $('#item-back', sheet);
+  const swapBtn = $('#item-swap', sheet);
   const backRemove = $('#item-back-remove', sheet);
   const reBtn = $('#item-reanalyze', sheet);
+  const updateButtons = () => {
+    frontBtn.textContent = 'Vorderseite ersetzen';
+    backBtn.textContent = d.back ? 'Rückseite ersetzen' : 'Rückseite hinzufügen';
+    swapBtn.hidden = backRemove.hidden = !d.back;
+  };
   const reanalyze = async () => {
     reBtn.disabled = true;
     reBtn.textContent = 'Wird analysiert …';
     try {
       // Bewusst neu erkennen: Farben, Muster und Style dürfen überschrieben werden, Kategorie und Name nicht
       d.colorsTouched = d.patternTouched = d.stylesTouched = false;
-      applyAnalysis(d, await analyzeItem({ front: item.image, back: d.back }, (f) => {
+      applyAnalysis(d, await analyzeItem({ front: d.front, back: d.back }, (f) => {
         if (f < 1) reBtn.textContent = `KI-Modell wird geladen · ${Math.round(f * 100)} %`;
       }));
     } catch (err) {
@@ -779,54 +845,68 @@ function openItemSheet(item) {
     reBtn.textContent = 'Farben, Muster & Style neu erkennen';
   };
   reBtn.onclick = reanalyze;
-  backBtn.onclick = async () => {
+
+  // Neues Foto für eine Seite: freistellen (Rückseite wie die Vorderseite), anzeigen, neu analysieren
+  const replacePhoto = async (side, btn) => {
     const f = await pickPhoto();
     if (!f || !sheet.open) return;
-    backBtn.disabled = true;
-    backBtn.textContent = 'Wird freigestellt …';
+    btn.disabled = true;
+    btn.textContent = 'Wird freigestellt …';
     try {
       const p = await preparePhoto(f);
-      // Wie die Vorderseite: freigestellt, wenn die Vorderseite freigestellt ist
-      const cut = item.cutout && !!p.cutout;
-      Object.assign(d, { back: cut ? p.cutout : p.original, backCutout: cut, backChanged: true });
-      view.setHasBack(true);
-      view.show('back');
-      backRemove.hidden = false;
+      if (side === 'front') {
+        Object.assign(d, { front: p.cutout || p.original, cutout: !!p.cutout, frontChanged: true });
+      } else {
+        const cut = d.cutout && !!p.cutout;
+        Object.assign(d, { back: cut ? p.cutout : p.original, backCutout: cut, backChanged: true });
+        view.setHasBack(true);
+      }
+      view.show(side);
+      updateButtons();
+      btn.disabled = false;
       await reanalyze();
     } catch (err) {
       console.warn(err);
-      toast('Die Rückseite konnte nicht gelesen werden');
+      toast('Das Foto konnte nicht gelesen werden');
     }
-    backBtn.disabled = false;
-    backBtn.textContent = d.back ? 'Rückseite ersetzen' : 'Rückseite hinzufügen';
+    btn.disabled = false;
+    updateButtons();
+  };
+  frontBtn.onclick = () => replacePhoto('front', frontBtn);
+  backBtn.onclick = () => replacePhoto('back', backBtn);
+  swapBtn.onclick = () => {
+    [d.front, d.back] = [d.back, d.front];
+    [d.cutout, d.backCutout] = [d.backCutout, d.cutout];
+    d.frontChanged = d.backChanged = true;
+    view.show('front');
+    toast('Vorder- und Rückseite getauscht');
   };
   backRemove.onclick = () => {
     Object.assign(d, { back: null, backCutout: false, backChanged: true });
     view.setHasBack(false);
-    backRemove.hidden = true;
-    backBtn.textContent = 'Rückseite hinzufügen';
+    updateButtons();
     reanalyze();
   };
 
   $('#item-save', sheet).onclick = async () => {
     draftToItem(d, item);
     item.updatedAt = Date.now();
+    if (d.frontChanged) {
+      dropUrl(item.id);
+      Object.assign(item, { image: d.front, cutout: d.cutout, aspect: await imageAspect(d.front), imageRev: item.updatedAt });
+    }
     if (d.backChanged) {
       dropUrl(item.id, { backOnly: true });
       if (d.back) Object.assign(item, { back: d.back, backCutout: d.backCutout, backRev: item.updatedAt });
       else { delete item.back; delete item.backCutout; item.backRev = null; }
     }
     await db.put('items', item);
-    sync.markChanged('item', item.id, 'put', { back: d.backChanged });
-    closeSheet();
+    sync.markChanged('item', item.id, 'put', { image: d.frontChanged, back: d.backChanged });
     render();
+    openItemSheet(item);
     toast('Gespeichert');
   };
-  $('#item-studio', sheet).onclick = () => {
-    closeSheet();
-    addToStudio(item);
-    show('studio');
-  };
+  $('#item-cancel', sheet).onclick = () => openItemSheet(item);
   $('#item-delete', sheet).onclick = async () => {
     const extra = usedIn ? ` Es verschwindet auch aus ${plural(usedIn, 'Outfit', 'Outfits')}.` : '';
     if (!confirm(`„${item.name}“ wirklich löschen?${extra}`)) return;

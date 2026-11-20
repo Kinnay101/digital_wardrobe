@@ -268,6 +268,16 @@ h2 { font-size: 20px; letter-spacing: -.02em; margin: 0 0 6px; }
 }
 .side-switch button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
 .back-row { margin-bottom: 14px; }
+.photo-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin-bottom: 14px; }
+.photo-actions [hidden] { display: none; }
+.photo-actions .btn { min-width: 0; padding: 0 10px; height: 40px; }
+.photo-actions + .note { margin-top: -4px; }
+.info-list { margin: 0 0 16px; padding: 2px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; }
+.info-list > div { display: grid; grid-template-columns: 88px 1fr; gap: 10px; align-items: center; padding: 11px 0; border-bottom: 1px solid var(--line); }
+.info-list > div:last-child { border-bottom: 0; }
+.info-list dt { font-size: 13px; font-weight: 650; color: var(--muted); }
+.info-list dd { margin: 0; font-size: 15px; min-width: 0; overflow-wrap: anywhere; }
+.info-list .color-legend { margin: 4px 0 0; }
 
 /* ---------- Heute ---------- */
 .segmented { display: flex; gap: 2px; padding: 3px; border-radius: 999px; background: var(--chip); align-self: center; }

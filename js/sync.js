@@ -290,7 +290,9 @@ async function pull(c, dek, userId) {
         const updatedAt = Date.parse(row.updated_at);
         if (kind === 'item') {
           const local = await db.get('items', row.id);
-          const image = local?.image || await downloadImage(c, dek, imagePath(userId, row.id), data.imageType);
+          // Vorderseite: neu laden, wenn sie auf dem anderen Gerät ersetzt wurde (imageRev, ältere Teile haben keinen)
+          const sameImage = local?.image && (local.imageRev || null) === (data.imageRev || null);
+          const image = sameImage ? local.image : await downloadImage(c, dek, imagePath(userId, row.id), data.imageType);
           // Rückseite: nur laden, wenn es eine gibt und sie sich geändert hat (backRev = Zeitpunkt der letzten Änderung)
           let back = null;
           if (data.backRev) {
