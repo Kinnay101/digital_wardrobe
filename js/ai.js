@@ -141,18 +141,26 @@ export const SEG_GARMENTS = [
   ['hosen', 'pants'], ['hosen', 'jeans'], ['hosen', 'a skirt'], ['schuhe', 'shoes'],
   ['accessoires', 'a bag'], ['accessoires', 'a hat'], ['accessoires', 'a belt'],
 ];
-const SEG_NEGATIVE = ['a face', 'hair', 'an arm', 'a hand', 'skin', 'a leg', 'the background'];
+// Gegenklassen: 'a face', 'hair', 'an arm', 'a hand', 'skin', 'a leg', 'the background'
+// Die Begriffe sind fest, daher sind ihre Token-Nummern vorberechnet (mit dem CLIPSeg-Tokenizer,
+// gleiche Reihenfolge: erst SEG_GARMENTS, dann die Gegenklassen). So braucht es zur Laufzeit keinen
+// Tokenizer – dessen Ladeprüfung schlägt in transformers.js 4.3.2 bei Modellen von der eigenen Adresse fehl.
+const SEG_TOKENS = {
+  dims: [18, 4],
+  input_ids: [49406, 320, 2523, 49407, 49406, 320, 11455, 49407, 49406, 320, 6164, 49407, 49406, 320, 2595, 49407, 49406, 5003, 49407, 49407, 49406, 10157, 49407, 49407, 49406, 320, 12386, 49407, 49406, 4079, 49407, 49407, 49406, 320, 3365, 49407, 49406, 320, 3801, 49407, 49406, 320, 7373, 49407, 49406, 320, 1710, 49407, 49406, 2225, 49407, 49407, 49406, 550, 4793, 49407, 49406, 320, 2463, 49407, 49406, 3575, 49407, 49407, 49406, 320, 4924, 49407, 49406, 518, 5994, 49407],
+  attention_mask: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+};
 
 let segPromise;
 function loadSeg() {
   segPromise ??= (async () => {
     const TF = await loadTf();
-    const [tokenizer, processor, model] = await Promise.all([
-      TF.AutoTokenizer.from_pretrained(CLIPSEG),
+    const [processor, model] = await Promise.all([
       TF.AutoProcessor.from_pretrained(CLIPSEG),
       TF.CLIPSegForImageSegmentation.from_pretrained(CLIPSEG, { dtype: 'q8', device: 'wasm', progress_callback: onProgress }),
     ]);
-    const textInputs = tokenizer([...SEG_GARMENTS.map((g) => g[1]), ...SEG_NEGATIVE], { padding: true, truncation: true });
+    const tensor = (values) => new TF.Tensor('int64', BigInt64Array.from(values, BigInt), SEG_TOKENS.dims);
+    const textInputs = { input_ids: tensor(SEG_TOKENS.input_ids), attention_mask: tensor(SEG_TOKENS.attention_mask) };
     return { TF, processor, model, textInputs };
   })().catch((err) => { segPromise = null; throw err; });
   return segPromise;
