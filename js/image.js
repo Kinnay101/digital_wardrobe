@@ -297,8 +297,13 @@ function rgbToLab(r, g, b) {
 const EXTRA_TONES = {
   blau: ['#2A55D0', '#1E4FA8'], lila: ['#5B2C8F', '#B59AD6'], rot: ['#E02020', '#A82222'], gruen: ['#2FA84F', '#8DBF7A', '#9FD8C0'],
   rosa: ['#F2C4CE', '#E0679A'], orange: ['#F28C28'], gelb: ['#F5D90A', '#F0E2A0'], hellblau: ['#B9D4EE', '#6FA8DC'],
-  grau: ['#C8C8C6', '#6A6A68'], beige: ['#EDE3CF'], navy: ['#24305E'], braun: ['#5A3A22'],
+  grau: ['#C8C8C6', '#6A6A68', '#5E5E5E'], beige: ['#EDE3CF'], navy: ['#24305E'],
+  // Dunkles Braun wirkt auf Fotos kaum gesättigt (Lab etwa L 20–40, Buntheit 6–10) – sonst wird es Schwarz/Grau
+  braun: ['#5A3A22', '#433129', '#56423F', '#715952'],
 };
+// Dunkle, fast farblose Töne (Schatten, Lichtreflexe auf Schwarz) nur Schwarz/Grau/Weiß zuordnen,
+// damit die gedeckten Brauntöne oben schwarze Kleidung nicht braun färben
+const MIN_DARK_CHROMA = 5;
 const PALETTE = () => COLORS.filter((c) => c.hex.startsWith('#'))
   .flatMap((c) => [c.hex, ...(EXTRA_TONES[c.id] || [])].map((hex) => ({ id: c.id, lab: rgbToLab(...hexToRgb(hex)) })));
 const NEUTRAL = ['schwarz', 'weiss', 'grau'];
@@ -419,7 +424,12 @@ export async function extractColors(blobs) {
   centers.forEach((c, k) => {
     if (!counts[k]) return;
     let best = null, bd = Infinity;
-    for (const p of palette) { const d = labDist(c, p.lab, 0.7); if (d < bd) { bd = d; best = p.id; } }
+    const neutralOnly = c[0] < 50 && Math.hypot(c[1], c[2]) < MIN_DARK_CHROMA;
+    for (const p of palette) {
+      if (neutralOnly && !NEUTRAL.includes(p.id)) continue;
+      const d = labDist(c, p.lab, 0.7);
+      if (d < bd) { bd = d; best = p.id; }
+    }
     shares.set(best, (shares.get(best) || 0) + counts[k] / px.length);
   });
   let list = [...shares.entries()].map(([id, share]) => ({ id, share })).sort((a, b) => b.share - a.share);
