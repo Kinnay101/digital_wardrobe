@@ -44,7 +44,10 @@ async function getClient() {
   if (client) return client;
   if (!window.supabase) await loadScript(new URL('../vendor/supabase/supabase.js', import.meta.url).href);
   client = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
-    auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false, storageKey: 'kleiderschrank-auth' },
+    // "implicit": Links aus E-Mails (Bestätigen, Passwort vergessen) funktionieren auch, wenn sie in einem
+    // anderen Browser geöffnet werden als dem, in dem sie angefordert wurden (z. B. Safari statt Home-Bildschirm-App).
+    // Die Tokens aus dem Link liest die App selbst aus (readAuthRedirect), daher detectSessionInUrl: false.
+    auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false, flowType: 'implicit', storageKey: 'kleiderschrank-auth' },
   });
   return client;
 }
@@ -114,6 +117,58 @@ async function finishSignIn(email, password, userId) {
   attachTriggers();
   sync();
   return { recoveryCode };
+}
+
+/* ---------- Passwort vergessen ---------- */
+
+/** Schickt eine E-Mail mit Link zum Zurücksetzen. */
+export async function requestPasswordReset(email) {
+  const c = await getClient();
+  try {
+    check(await c.auth.resetPasswordForEmail(email.trim(), { redirectTo: location.origin + location.pathname }));
+  } catch (err) { throw explain(err); }
+}
+
+/**
+ * Liest Anmelde-Infos aus einem E-Mail-Link (#access_token=…&type=recovery bzw. signup).
+ * Liefert null, wenn die Adresse keinen solchen Link enthält.
+ */
+export function readAuthRedirect(hash = location.hash) {
+  const p = new URLSearchParams(hash.replace(/^#/, ''));
+  if (p.get('error_description')) return { error: p.get('error_description').replace(/\+/g, ' ') };
+  if (!p.get('access_token')) return null;
+  return { type: p.get('type'), access_token: p.get('access_token'), refresh_token: p.get('refresh_token') };
+}
+
+/** Neues Passwort festlegen: Wiederherstellungs-Code entsperrt den Daten-Schlüssel, der neu eingepackt wird. */
+export async function completeReset(tokens, recoveryCode, newPassword) {
+  const c = await getClient();
+  let user;
+  try {
+    user = check(await c.auth.setSession({ access_token: tokens.access_token, refresh_token: tokens.refresh_token })).user;
+  } catch (err) {
+    throw new Error('Der Link ist abgelaufen oder wurde schon benutzt. Bitte fordere einen neuen an.');
+  }
+  const keyring = check(await c.from('keyring').select('*').maybeSingle());
+  if (!keyring) throw new Error('Für dieses Konto gibt es noch keinen Schlüssel – melde dich einfach mit einem neuen Passwort an.');
+  let result;
+  try {
+    result = await C.recoverAndRewrap(keyring, recoveryCode, newPassword);
+  } catch {
+    throw new Error('Der Wiederherstellungs-Code ist falsch.');
+  }
+  // Erst den Schlüsselbund aktualisieren, dann das Anmelde-Passwort. Schlägt der zweite Schritt fehl,
+  // lässt sich alles mit demselben Code wiederholen.
+  check(await c.from('keyring').update({ ...result.update, updated_at: new Date().toISOString() }).eq('user_id', user.id));
+  try {
+    check(await c.auth.updateUser({ password: await C.authSecret(user.email, newPassword) }));
+  } catch (err) { throw explain(err); }
+  await db.setMeta('dek', result.dek);
+  await db.setMeta('account', { email: user.email, userId: user.id });
+  await queueEverything();
+  setStatus({ signedIn: true, email: user.email, error: '' });
+  attachTriggers();
+  sync();
 }
 
 export async function signOut() {

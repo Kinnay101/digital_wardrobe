@@ -3,7 +3,7 @@
 // - vendor/ (Bibliothek, Rechen-Engine): "Cache zuerst" – feste Versionen, ändern sich nie.
 // - models/: nicht anfassen – transformers.js speichert die Modelle selbst im Cache "transformers-cache".
 //   (Würden wir sie hier auch speichern, lägen ~135 MB doppelt auf dem Gerät.)
-const APP_CACHE = 'kleiderschrank-v4';
+const APP_CACHE = 'kleiderschrank-v6';
 const VENDOR_CACHE = 'kleiderschrank-vendor-v1'; // bei neuer Bibliotheks-Version hochzählen
 const KEEP = [APP_CACHE, VENDOR_CACHE, 'transformers-cache'];
 const SHELL = [
@@ -45,8 +45,10 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
+  // cache: 'no-cache' = beim Server nachfragen, ob sich die Datei geändert hat (sonst kann der
+  // Browser-Zwischenspeicher alte und neue Dateien mischen, z. B. neue app.js + alte image.js).
   e.respondWith(
-    fetch(e.request)
+    fetch(e.request, { cache: 'no-cache' })
       .then((res) => {
         const copy = res.clone();
         caches.open(APP_CACHE).then((c) => c.put(e.request, copy));

@@ -76,5 +76,65 @@
   "bytes": 93973443,
   "sha256": "f1009cfce0eedd409f601e8351eedab72e8529641105eee6517821a9a634a2f4",
   "source": "huggingface.co/Marqo/marqo-fashionSigLIP @ c56244cc94f9, LFS-sha256 geprüft, Lizenz Apache-2.0"
+ },
+ {
+  "file": "models/Xenova/clipseg-rd64-refined/config.json",
+  "bytes": 794,
+  "sha256": "17e418f04a7728ce054371b7536c11965a71f2af147ed9beed6b8e11eaefa7b9",
+  "source": "huggingface.co/Xenova/clipseg-rd64-refined @ 924dc94f85f5, Lizenz Apache-2.0 (CIDAS), Basis OpenAI CLIP (MIT)"
+ },
+ {
+  "file": "models/Xenova/clipseg-rd64-refined/preprocessor_config.json",
+  "bytes": 378,
+  "sha256": "f0ae4c1dd6bffbbfbb9aa2f461489dd72b41f6906743a8bfd258532f09c0332c",
+  "source": "huggingface.co/Xenova/clipseg-rd64-refined @ 924dc94f85f5, Lizenz Apache-2.0 (CIDAS), Basis OpenAI CLIP (MIT)"
+ },
+ {
+  "file": "models/Xenova/clipseg-rd64-refined/tokenizer.json",
+  "bytes": 2224080,
+  "sha256": "342739d4a4b111d4b1bda83a96f5c518e1b162cc597252ac89ded17681791d31",
+  "source": "huggingface.co/Xenova/clipseg-rd64-refined @ 924dc94f85f5, Lizenz Apache-2.0 (CIDAS), Basis OpenAI CLIP (MIT)"
+ },
+ {
+  "file": "models/Xenova/clipseg-rd64-refined/tokenizer_config.json",
+  "bytes": 775,
+  "sha256": "d64e766f161ee704a0f5c90419b4d4181239d675e8176d94efdb1c64bbcb0055",
+  "source": "huggingface.co/Xenova/clipseg-rd64-refined @ 924dc94f85f5, Lizenz Apache-2.0 (CIDAS), Basis OpenAI CLIP (MIT)"
+ },
+ {
+  "file": "models/Xenova/clipseg-rd64-refined/special_tokens_map.json",
+  "bytes": 472,
+  "sha256": "c4864a9376a8401918425bed71fc14fc0e81f9b59ec45c1cf96cccb2df508eac",
+  "source": "huggingface.co/Xenova/clipseg-rd64-refined @ 924dc94f85f5, Lizenz Apache-2.0 (CIDAS), Basis OpenAI CLIP (MIT)"
+ },
+ {
+  "file": "models/Xenova/clipseg-rd64-refined/vocab.json",
+  "bytes": 862328,
+  "sha256": "5047b556ce86ccaf6aa22b3ffccfc52d391ea4accdab9c2f2407da5b742d4363",
+  "source": "huggingface.co/Xenova/clipseg-rd64-refined @ 924dc94f85f5, Lizenz Apache-2.0 (CIDAS), Basis OpenAI CLIP (MIT)"
+ },
+ {
+  "file": "models/Xenova/clipseg-rd64-refined/merges.txt",
+  "bytes": 524619,
+  "sha256": "9fd691f7c8039210e0fced15865466c65820d09b63988b0174bfe25de299051a",
+  "source": "huggingface.co/Xenova/clipseg-rd64-refined @ 924dc94f85f5, Lizenz Apache-2.0 (CIDAS), Basis OpenAI CLIP (MIT)"
+ },
+ {
+  "file": "models/Xenova/clipseg-rd64-refined/onnx/model_quantized.onnx.part1",
+  "bytes": 90000000,
+  "sha256": "0cae876af020cf4cba6190d60c18c60fe8b53b5960e5e47dd897ed6ed6f12c10",
+  "source": "huggingface.co/Xenova/clipseg-rd64-refined @ 924dc94f85f5, Teil 1 von 2 der Datei onnx/model_quantized.onnx (Gesamt-sha256 049010b152839f339d6115e668d560860d0031f7b750b24828c07167ba68812a, LFS-geprüft), Lizenz Apache-2.0 (CIDAS), Basis OpenAI CLIP (MIT)"
+ },
+ {
+  "file": "models/Xenova/clipseg-rd64-refined/onnx/model_quantized.onnx.part2",
+  "bytes": 49115836,
+  "sha256": "2957f39acc72a2783ee7cbc15c9822516000a65e75516260a59d8ca3739e00ef",
+  "source": "huggingface.co/Xenova/clipseg-rd64-refined @ 924dc94f85f5, Teil 2 von 2 der Datei onnx/model_quantized.onnx (Gesamt-sha256 049010b152839f339d6115e668d560860d0031f7b750b24828c07167ba68812a, LFS-geprüft), Lizenz Apache-2.0 (CIDAS), Basis OpenAI CLIP (MIT)"
+ },
+ {
+  "file": "models/Xenova/clipseg-rd64-refined/onnx/model_quantized.onnx.parts.json",
+  "bytes": 168,
+  "sha256": "7804a842edc9384d5a222d12eca6904b1090e082adafa60fa9876c700411d23f",
+  "source": "selbst erzeugt: Manifest zum Zusammensetzen der Teile"
  }
 ]

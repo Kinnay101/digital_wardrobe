@@ -23,6 +23,7 @@ Herkunft, Prüfsummen und Lizenzen: [vendor/README.md](vendor/README.md).
 - [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) – MIT
 - [RMBG-1.4](https://huggingface.co/briaai/RMBG-1.4) von BRIA AI – Lizenz [bria-rmbg-1.4](https://bria.ai/bria-huggingface-model-license-agreement/), nur für nicht-kommerzielle Nutzung
 - [Marqo-FashionSigLIP](https://huggingface.co/Marqo/marqo-fashionSigLIP) von Marqo – Apache-2.0
+- [CLIPSeg](https://huggingface.co/CIDAS/clipseg-rd64-refined) – Apache-2.0 (Kleidung auf Fotos mit Person)
 - [supabase-js](https://github.com/supabase/supabase-js) – MIT (für den optionalen, verschlüsselten Sync)
 
 Diese App ist ein privates, nicht-kommerzielles Projekt.

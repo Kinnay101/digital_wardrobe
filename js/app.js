@@ -1,6 +1,6 @@
 import * as db from './db.js';
 import {
-  downscale, removeBackground, trimTransparent, detectColor, imageAspect, onWhite,
+  downscale, removeBackground, trimTransparent, detectColor, imageAspect, onWhite, extractGarments,
   COLORS, colorById, blobToDataUrl, dataUrlToBlob,
 } from './image.js';
 import { classify } from './ai.js';
@@ -230,6 +230,7 @@ async function openAddSheet(file) {
     <div class="sheet-head"><h2>Neues Teil</h2><button class="icon-btn" data-close aria-label="Schließen">${ICON.close}</button></div>
     <div class="sheet-preview" id="add-preview"><div class="progress-pill" id="add-progress">Foto wird geladen …</div></div>
     <label class="toggle-row" id="add-cutout-row" hidden>Hintergrund entfernen <input type="checkbox" id="add-cutout" checked></label>
+    <button class="btn btn-ghost btn-block" id="add-multi" style="margin-bottom:14px" hidden>Foto mit Person? Teile einzeln herauslösen</button>
     ${itemFieldsHtml(d)}
     <button class="btn btn-primary btn-block" id="add-save" disabled>Wird verarbeitet …</button>
   </div>`);
@@ -299,6 +300,32 @@ async function openAddSheet(file) {
       showImage(d.useCutout ? d.cutout : d.original, d.useCutout, false);
     };
   }
+  // Mehrere Teile auf einem Foto mit Person: nur auf Wunsch (lädt beim ersten Mal ein weiteres Modell)
+  const multiBtn = $('#add-multi', sheet);
+  multiBtn.hidden = false;
+  multiBtn.onclick = async () => {
+    const label = multiBtn.textContent;
+    multiBtn.disabled = true;
+    multiBtn.textContent = 'Teile werden gesucht …';
+    try {
+      const res = await extractGarments(d.original, (f) => {
+        if (alive()) multiBtn.textContent = f < 1 ? `KI-Modell wird geladen · ${Math.round(f * 100)} %` : 'Teile werden gesucht …';
+      });
+      if (!alive()) return;
+      if (!res.pieces.length) throw new Error('none');
+      if (!res.person && res.pieces.length < 2) {
+        toast('Hier ist nur ein Teil zu sehen – einfach normal speichern');
+      } else {
+        openMultiSheet(res.pieces);
+        return;
+      }
+    } catch (err) {
+      if (err.message !== 'none') console.warn(err);
+      if (alive()) toast(err.message === 'none' ? 'Keine einzelnen Teile gefunden' : 'Erkennung fehlgeschlagen');
+    }
+    if (alive()) { multiBtn.disabled = false; multiBtn.textContent = label; }
+  };
+
   const saveBtn = $('#add-save', sheet);
   saveBtn.disabled = false;
   saveBtn.textContent = 'In den Schrank legen';
@@ -330,6 +357,84 @@ async function openAddSheet(file) {
     closeSheet();
     render();
     toast(`„${item.name}“ hinzugefügt`);
+  };
+}
+
+/* ---------- Mehrere Teile aus einem Foto ---------- */
+function openMultiSheet(pieces) {
+  const token = {};
+  addToken = token;
+  const alive = () => addToken === token;
+  const drafts = pieces.map((p) => ({
+    name: '', category: p.category, color: 'grau', kind: null, blob: p.blob, selected: true, url: URL.createObjectURL(p.blob),
+  }));
+  openSheet(`<div class="sheet-inner">
+    <div class="sheet-head"><h2>${plural(drafts.length, 'Teil', 'Teile')} gefunden</h2><button class="icon-btn" data-close aria-label="Schließen">${ICON.close}</button></div>
+    <p class="note">Wähle aus, was in den Schrank soll. Namen und Kategorien kannst du anpassen.</p>
+    <div class="multi-list">
+      ${drafts.map((dr, i) => `<div class="multi-item">
+        <input type="checkbox" class="multi-check" data-sel="${i}" checked aria-label="Teil ${i + 1} übernehmen">
+        <div class="multi-thumb"><img class="sticker" src="${dr.url}" alt=""></div>
+        <div class="multi-fields">
+          <input class="input" data-name="${i}" placeholder="${esc(defaultName(dr))}" maxlength="60" autocomplete="off">
+          <select class="input" data-cat="${i}">${CATEGORIES.map((c) => `<option value="${c.id}"${c.id === dr.category ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+        </div>
+      </div>`).join('')}
+    </div>
+    <button class="btn btn-primary btn-block" id="multi-save" disabled>Wird analysiert …</button>
+  </div>`);
+  const saveBtn = $('#multi-save', sheet);
+  const refresh = (i) => { const el = sheet.querySelector(`[data-name="${i}"]`); if (el) el.placeholder = defaultName(drafts[i]); };
+  const updateCount = () => {
+    const n = drafts.filter((d) => d.selected).length;
+    saveBtn.textContent = n ? `${plural(n, 'Teil', 'Teile')} hinzufügen` : 'Nichts ausgewählt';
+    saveBtn.disabled = !n;
+  };
+  sheet.querySelectorAll('[data-sel]').forEach((el) => { el.onchange = () => { drafts[el.dataset.sel].selected = el.checked; updateCount(); }; });
+  sheet.querySelectorAll('[data-name]').forEach((el) => { el.oninput = () => { drafts[el.dataset.name].name = el.value; }; });
+  sheet.querySelectorAll('[data-cat]').forEach((el) => {
+    el.onchange = () => { const d = drafts[el.dataset.cat]; d.category = el.value; d.catTouched = true; refresh(el.dataset.cat); };
+  });
+
+  // Jedes Teil einzeln nachschärfen: Farbe + genaue Art (FashionSigLIP ist auf Einzelteilen sehr treffsicher)
+  (async () => {
+    for (let i = 0; i < drafts.length; i++) {
+      const d = drafts[i];
+      try {
+        d.color = await detectColor(d.blob);
+        const r = await classify(await onWhite(d.blob));
+        if (!alive()) return;
+        d.kind = { category: r.category, word: KIND_DE[r.label] || catById(r.category).one };
+        if (!d.catTouched && r.confidence > 0.6) {
+          d.category = r.category;
+          const sel = sheet.querySelector(`[data-cat="${i}"]`);
+          if (sel) sel.value = r.category;
+        }
+        refresh(i);
+      } catch (err) { console.warn('Analyse eines Teils fehlgeschlagen', err); }
+    }
+    if (alive()) updateCount();
+  })();
+
+  saveBtn.onclick = async () => {
+    saveBtn.disabled = true;
+    let added = 0;
+    for (const d of drafts) {
+      if (!d.selected) continue;
+      const now = Date.now();
+      const item = {
+        id: db.uid(), name: d.name.trim() || defaultName(d), category: d.category, color: d.color,
+        image: d.blob, cutout: true, aspect: await imageAspect(d.blob), createdAt: now, updatedAt: now,
+      };
+      await db.put('items', item);
+      sync.markChanged('item', item.id, 'put', { image: true });
+      state.items.unshift(item);
+      added++;
+    }
+    drafts.forEach((d) => URL.revokeObjectURL(d.url));
+    closeSheet();
+    render();
+    toast(`${plural(added, 'Teil', 'Teile')} hinzugefügt`);
   };
 }
 
@@ -786,9 +891,10 @@ function openAuthSheet(mode) {
       <p class="form-error" id="auth-error" hidden></p>
       <button class="btn btn-primary btn-block" id="auth-submit" type="submit">${signup ? 'Konto erstellen' : 'Anmelden'}</button>
     </form>
-    <p class="note" style="margin-top:14px;text-align:center">${signup ? 'Schon ein Konto? <a href="#" id="auth-switch">Anmelden</a>' : 'Noch kein Konto? <a href="#" id="auth-switch">Konto erstellen</a>'}</p>
+    <p class="note" style="margin-top:14px;text-align:center">${signup ? 'Schon ein Konto? <a href="#" id="auth-switch">Anmelden</a>' : 'Noch kein Konto? <a href="#" id="auth-switch">Konto erstellen</a> · <a href="#" id="auth-forgot">Passwort vergessen?</a>'}</p>
   </div>`);
   $('#auth-switch', sheet).onclick = (e) => { e.preventDefault(); openAuthSheet(signup ? 'signin' : 'signup'); };
+  $('#auth-forgot', sheet)?.addEventListener('click', (e) => { e.preventDefault(); openForgotSheet($('#auth-email', sheet).value.trim()); });
   const errorEl = $('#auth-error', sheet);
   const showError = (msg) => { errorEl.textContent = msg; errorEl.hidden = !msg; };
   $('#auth-form', sheet).onsubmit = async (e) => {
@@ -816,6 +922,83 @@ function openAuthSheet(mode) {
       showError(err.message);
       btn.disabled = false;
       btn.textContent = signup ? 'Konto erstellen' : 'Anmelden';
+    }
+  };
+}
+
+/** Passwort vergessen, Schritt 1: Link per E-Mail anfordern. */
+function openForgotSheet(prefill = '') {
+  openSheet(`<div class="sheet-inner">
+    <div class="sheet-head"><h2>Passwort vergessen</h2><button class="icon-btn" data-close aria-label="Schließen">${ICON.close}</button></div>
+    <p class="note">Du bekommst einen Link per E-Mail. Danach brauchst du deinen <b>Wiederherstellungs-Code</b> – ohne ihn lassen sich deine Daten nicht entschlüsseln.</p>
+    <form id="forgot-form" novalidate>
+      <label class="field"><span>E-Mail</span>
+        <input class="input" type="email" id="forgot-email" autocomplete="username" value="${esc(prefill)}" required>
+      </label>
+      <p class="form-error" id="forgot-error" hidden></p>
+      <button class="btn btn-primary btn-block" id="forgot-submit" type="submit">Link schicken</button>
+    </form>
+  </div>`);
+  const errorEl = $('#forgot-error', sheet);
+  $('#forgot-form', sheet).onsubmit = async (e) => {
+    e.preventDefault();
+    const email = $('#forgot-email', sheet).value.trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { errorEl.textContent = 'Bitte eine gültige E-Mail-Adresse eingeben.'; errorEl.hidden = false; return; }
+    const btn = $('#forgot-submit', sheet);
+    btn.disabled = true;
+    btn.textContent = 'Einen Moment …';
+    try {
+      await sync.requestPasswordReset(email);
+      openInfoSheet('E-Mail unterwegs', `Falls es ein Konto für <b>${esc(email)}</b> gibt, ist ein Link unterwegs. Öffne ihn (gerne direkt auf dem Gerät, auf dem du die Mail liest) und halte deinen Wiederherstellungs-Code bereit.`);
+    } catch (err) {
+      errorEl.textContent = err.message;
+      errorEl.hidden = false;
+      btn.disabled = false;
+      btn.textContent = 'Link schicken';
+    }
+  };
+}
+
+/** Passwort vergessen, Schritt 2: App wurde über den Link geöffnet. */
+function openResetSheet(tokens) {
+  openSheet(`<div class="sheet-inner">
+    <div class="sheet-head"><h2>Neues Passwort</h2><button class="icon-btn" data-close aria-label="Schließen">${ICON.close}</button></div>
+    <p class="note">Gib deinen Wiederherstellungs-Code ein und lege ein neues Passwort fest.</p>
+    <form id="reset-form" novalidate>
+      <label class="field"><span>Wiederherstellungs-Code</span>
+        <input class="input" id="reset-code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX" required>
+      </label>
+      <label class="field"><span>Neues Passwort (mind. 10 Zeichen)</span>
+        <input class="input" type="password" id="reset-pw" autocomplete="new-password" required>
+      </label>
+      <label class="field"><span>Neues Passwort wiederholen</span>
+        <input class="input" type="password" id="reset-pw2" autocomplete="new-password" required>
+      </label>
+      <p class="form-error" id="reset-error" hidden></p>
+      <button class="btn btn-primary btn-block" id="reset-submit" type="submit">Passwort speichern</button>
+    </form>
+  </div>`);
+  const errorEl = $('#reset-error', sheet);
+  const showError = (msg) => { errorEl.textContent = msg; errorEl.hidden = !msg; };
+  $('#reset-form', sheet).onsubmit = async (e) => {
+    e.preventDefault();
+    const code = $('#reset-code', sheet).value.trim();
+    const pw = $('#reset-pw', sheet).value;
+    if (code.replace(/[^A-Za-z0-9]/g, '').length !== 24) return showError('Der Code hat 24 Zeichen (6 Blöcke à 4).');
+    if (pw.length < 10) return showError('Das Passwort muss mindestens 10 Zeichen lang sein.');
+    if (pw !== $('#reset-pw2', sheet).value) return showError('Die Passwörter stimmen nicht überein.');
+    showError('');
+    const btn = $('#reset-submit', sheet);
+    btn.disabled = true;
+    btn.textContent = 'Einen Moment …';
+    try {
+      await sync.completeReset(tokens, code, pw);
+      closeSheet();
+      toast('Neues Passwort gespeichert – Sync läuft');
+    } catch (err) {
+      showError(err.message);
+      btn.disabled = false;
+      btn.textContent = 'Passwort speichern';
     }
   };
 }
@@ -970,9 +1153,17 @@ async function init() {
     const v = location.hash.slice(1);
     if (v !== state.view) show(v);
   });
+  // Wurde die App über einen Link aus einer E-Mail geöffnet (Bestätigung / Passwort vergessen)?
+  const authRedirect = sync.available() ? sync.readAuthRedirect() : null;
+  if (authRedirect) history.replaceState(null, '', location.pathname + location.search); // Tokens aus der Adresse entfernen
+
   show(location.hash.slice(1) || 'wardrobe');
   db.requestPersistence();
   sync.init().catch((err) => console.warn('Sync-Start', err));
+
+  if (authRedirect?.error) openInfoSheet('Link ungültig', `${esc(authRedirect.error)}. Bitte fordere einen neuen Link an.`);
+  else if (authRedirect?.type === 'recovery') openResetSheet(authRedirect);
+  else if (authRedirect?.type === 'signup') openInfoSheet('E-Mail bestätigt', 'Super! Melde dich jetzt unter dem Zahnrad mit deiner E-Mail und deinem Passwort an.');
 
   const local = ['localhost', '127.0.0.1'].includes(location.hostname);
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || local)) {

@@ -8,6 +8,7 @@ Jede Datei wurde beim Herunterladen gegen die offizielle Prüfsumme geprüft (np
 | `vendor/transformers/transformers.min.js` | npm `@huggingface/transformers@4.3.2` | Apache-2.0 (siehe LICENSE) |
 | `vendor/ort/*` | npm `onnxruntime-web@1.31.0-dev.20260914-8d85527a0` (Version, die transformers.js 4.3.2 erwartet) | MIT |
 | `models/briaai/RMBG-1.4/` | huggingface.co/briaai/RMBG-1.4 @ `da1d078376e6` | bria-rmbg-1.4: **nur nicht-kommerziell** |
+| `models/Xenova/clipseg-rd64-refined/` | huggingface.co/Xenova/clipseg-rd64-refined @ `924dc94f85f5` (q8); Modelldatei wegen GitHubs 100-MB-Grenze in 2 Teile zerlegt, wird im Browser zusammengesetzt und gegen die Gesamt-sha256 geprüft (`model_quantized.onnx.parts.json`) | Apache-2.0 (CIDAS), Basis OpenAI CLIP (MIT) |
 | `models/Marqo/marqo-fashionSigLIP/` | huggingface.co/Marqo/marqo-fashionSigLIP (nur Bild-Modell, q8) | Apache-2.0 |
 | `vendor/supabase/supabase.js` | npm `@supabase/supabase-js@2.119.0` (bewusst eine ≥ 2 Wochen alte Version) | MIT (siehe LICENSE) |
 | `js/labels.json` | selbst berechnet mit dem Text-Modell von Marqo FashionSigLIP | Apache-2.0 (abgeleitet) |

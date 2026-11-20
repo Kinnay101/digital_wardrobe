@@ -1,5 +1,5 @@
 // Bildverarbeitung: verkleinern, Hintergrund entfernen, aufräumen, zuschneiden, Farbe erkennen.
-import { segmentMask } from './ai.js';
+import { segmentMask, garmentMaps, SEG_GARMENTS } from './ai.js';
 
 const MAX_SIDE = 1200;
 
@@ -42,6 +42,81 @@ export async function removeBackground(blob, onProgress) {
   for (let i = 0; i < mask.data.length; i++) px.data[i * 4 + 3] = mask.data[i];
   ctx.putImageData(px, 0, 0);
   return canvasToBlob(c, 'image/png');
+}
+
+/**
+ * Löst auf einem Foto mit Person jedes Kleidungsstück einzeln heraus.
+ * RMBG liefert die scharfe Außenkante (Person vs. Hintergrund), CLIPSeg ordnet jedes Pixel einem
+ * Kleidungsstück oder einer Gegenklasse (Haut, Gesicht …) zu.
+ * Liefert { person: boolean, pieces: [{ category, blob, area }] } – nach Fläche sortiert.
+ */
+export async function extractGarments(blob, onProgress) {
+  const fg = await segmentMask(blob, onProgress);
+  const maps = await garmentMaps(blob, onProgress);
+  const { probs, n, h, w, garments } = maps;
+  const W = fg.width, H = fg.height, N = W * H;
+
+  // Zu jedem Pixel den wahrscheinlichsten Begriff (bilinear aus dem 352er Raster)
+  const label = new Int16Array(N).fill(-1);
+  let fgCount = 0, personCount = 0;
+  const plane = h * w;
+  for (let y = 0; y < H; y++) {
+    const fy = Math.max(0, Math.min(h - 1, (y + 0.5) * h / H - 0.5));
+    const y0 = Math.floor(fy), y1 = Math.min(h - 1, y0 + 1), ty = fy - y0;
+    for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      if (fg.data[i] < 128) continue;
+      fgCount++;
+      const fx = Math.max(0, Math.min(w - 1, (x + 0.5) * w / W - 0.5));
+      const x0 = Math.floor(fx), x1 = Math.min(w - 1, x0 + 1), tx = fx - x0;
+      const a = y0 * w + x0, b = y0 * w + x1, c = y1 * w + x0, d = y1 * w + x1;
+      const wa = (1 - tx) * (1 - ty), wb = tx * (1 - ty), wc = (1 - tx) * ty, wd = tx * ty;
+      let best = -1, bp = 0;
+      for (let k = 0; k < n; k++) {
+        const o = k * plane;
+        const p = probs[o + a] * wa + probs[o + b] * wb + probs[o + c] * wc + probs[o + d] * wd;
+        if (p > bp) { bp = p; best = k; }
+      }
+      if (best >= garments) personCount++;
+      else if (bp > 0.35) label[i] = best;
+    }
+  }
+  const person = fgCount > 0 && personCount / fgCount > 0.04;
+
+  // Begriffe zu Teilen zusammenfassen: eine Kategorie = ein Teil; Accessoires einzeln (Tasche ≠ Hut)
+  const keyOf = (k) => {
+    const [cat, text] = SEG_GARMENTS[k];
+    return cat === 'accessoires' ? `accessoires:${text}` : cat;
+  };
+  const areas = new Map();
+  for (let i = 0; i < N; i++) if (label[i] >= 0) { const k = keyOf(label[i]); areas.set(k, (areas.get(k) || 0) + 1); }
+  // "Kleid" vs. "Oberteil": CLIPSeg verwechselt lange Oberteile gern mit Kleidern -> die größere Fläche gewinnt
+  const top = areas.get('oberteile') || 0, dress = areas.get('kleider') || 0, pants = areas.get('hosen') || 0;
+  const merge = dress && top ? (dress < top || pants > dress * 0.3 ? ['kleider', 'oberteile'] : ['oberteile', 'kleider']) : null;
+
+  const pieces = [];
+  const img = await loadImage(blob);
+  for (const [key, area] of areas) {
+    if (merge && key === merge[0]) continue;
+    if (area < N * 0.015) continue; // Winzige Flächen ignorieren
+    const keys = merge && key === merge[1] ? [merge[0], merge[1]] : [key];
+    const mask = new Uint8Array(N);
+    for (let i = 0; i < N; i++) if (label[i] >= 0 && keys.includes(keyOf(label[i]))) mask[i] = fg.data[i];
+    cleanMask(mask, W, H);
+    const c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0, W, H);
+    const px = ctx.getImageData(0, 0, W, H);
+    let kept = 0;
+    for (let i = 0; i < N; i++) { px.data[i * 4 + 3] = mask[i]; if (mask[i] > 128) kept++; }
+    if (kept < N * 0.01) continue;
+    ctx.putImageData(px, 0, 0);
+    const cut = await trimTransparent(await canvasToBlob(c, 'image/png'));
+    pieces.push({ category: key.split(':')[0], blob: cut, area: kept });
+  }
+  pieces.sort((p, q) => q.area - p.area);
+  return { person, pieces };
 }
 
 /**

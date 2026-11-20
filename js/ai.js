@@ -17,8 +17,45 @@ const loadTf = () => (tfPromise ??= import(TF_URL).then((TF) => {
   TF.env.allowLocalModels = true;
   TF.env.localModelPath = MODELS_URL;
   TF.env.backends.onnx.wasm.wasmPaths = ORT_URL; // Rechen-Engine nicht vom CDN holen
+  TF.env.fetch = splitAwareFetch(TF.env.fetch);
   return TF;
 }));
+
+/**
+ * GitHub erlaubt keine Dateien über 100 MB. Größere Modelle liegen daher in Teilen vor
+ * (<datei>.part1, .part2 … plus <datei>.parts.json mit Größe und SHA-256).
+ * Fehlt eine Datei, werden die Teile geladen, zusammengesetzt und die Prüfsumme kontrolliert.
+ */
+function splitAwareFetch(baseFetch) {
+  return async (input, init) => {
+    const url = String(input?.url ?? input);
+    const res = await baseFetch(input, init);
+    if (res.status !== 404 || !url.startsWith(MODELS_URL)) return res;
+    const manifestRes = await baseFetch(url + '.parts.json');
+    if (!manifestRes.ok) return res;
+    const { size, sha256, parts } = await manifestRes.json();
+    const dir = url.slice(0, url.lastIndexOf('/') + 1);
+    const chunks = [];
+    let loaded = 0;
+    for (const part of parts) {
+      const r = await baseFetch(dir + part);
+      if (!r.ok) throw new Error(`Modell-Teil fehlt: ${part}`);
+      const reader = r.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        loaded += value.length;
+        onProgress({ status: 'progress', file: url, loaded, total: size });
+      }
+    }
+    const whole = new Blob(chunks);
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', await whole.arrayBuffer()));
+    const hex = [...digest].map((b) => b.toString(16).padStart(2, '0')).join('');
+    if (whole.size !== size || hex !== sha256) throw new Error('Prüfsumme des Modells stimmt nicht – Datei beschädigt oder verändert.');
+    return new Response(whole, { status: 200, headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(size) } });
+  };
+}
 
 /* Fortschritt beim Herunterladen der Modelle (über alle Dateien zusammengerechnet) */
 let progressListener = null;
@@ -93,6 +130,49 @@ function loadClip() {
     return { TF, processor, model, cats: labels.cats, labels: labels.labels, emb };
   })().catch((err) => { clipPromise = null; throw err; });
   return clipPromise;
+}
+
+/* ---------- Kleidung auf Fotos mit Person (CLIPSeg, Apache-2.0) ---------- */
+// CLIPSeg bekommt Begriffe und liefert für jeden eine grobe Wahrscheinlichkeitskarte (352×352).
+// Gegenklassen (Gesicht, Haut …) sorgen dafür, dass die Person selbst nicht als Kleidung zählt.
+const CLIPSEG = 'Xenova/clipseg-rd64-refined';
+export const SEG_GARMENTS = [
+  ['oberteile', 'a shirt'], ['oberteile', 'a sweater'], ['jacken', 'a jacket'], ['kleider', 'a dress'],
+  ['hosen', 'pants'], ['hosen', 'jeans'], ['hosen', 'a skirt'], ['schuhe', 'shoes'],
+  ['accessoires', 'a bag'], ['accessoires', 'a hat'], ['accessoires', 'a belt'],
+];
+const SEG_NEGATIVE = ['a face', 'hair', 'an arm', 'a hand', 'skin', 'a leg', 'the background'];
+
+let segPromise;
+function loadSeg() {
+  segPromise ??= (async () => {
+    const TF = await loadTf();
+    const [tokenizer, processor, model] = await Promise.all([
+      TF.AutoTokenizer.from_pretrained(CLIPSEG),
+      TF.AutoProcessor.from_pretrained(CLIPSEG),
+      TF.CLIPSegForImageSegmentation.from_pretrained(CLIPSEG, { dtype: 'q8', device: 'wasm', progress_callback: onProgress }),
+    ]);
+    const textInputs = tokenizer([...SEG_GARMENTS.map((g) => g[1]), ...SEG_NEGATIVE], { padding: true, truncation: true });
+    return { TF, processor, model, textInputs };
+  })().catch((err) => { segPromise = null; throw err; });
+  return segPromise;
+}
+
+/**
+ * Wahrscheinlichkeitskarten für Kleidung und Gegenklassen.
+ * probs: Float32Array [n * h * w]; die ersten SEG_GARMENTS.length Einträge sind Kleidung, der Rest Gegenklassen.
+ */
+export async function garmentMaps(blob, onLoadProgress) {
+  progressListener = onLoadProgress;
+  try {
+    const { TF, processor, model, textInputs } = await loadSeg();
+    const image = await TF.RawImage.fromBlob(blob);
+    const { logits } = await model({ ...textInputs, ...(await processor(image)) });
+    const [n, h, w] = logits.dims;
+    return { probs: logits.sigmoid().data, n, h, w, garments: SEG_GARMENTS.length };
+  } finally {
+    progressListener = null;
+  }
 }
 
 /** Erkennt die Kategorie. Das Bild sollte freigestellt auf hellem Grund liegen. */

@@ -260,6 +260,13 @@ h2 { font-size: 20px; letter-spacing: -.02em; margin: 0 0 6px; }
   user-select: all; -webkit-user-select: all; overflow-wrap: anywhere;
 }
 .sheet a { color: var(--ink); font-weight: 650; }
+.multi-list { display: grid; gap: 10px; margin-bottom: 16px; }
+.multi-item { display: grid; grid-template-columns: 22px 84px 1fr; gap: 10px; align-items: center; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; padding: 10px; }
+.multi-check { width: 20px; height: 20px; accent-color: var(--accent); margin: 0; }
+.multi-thumb { width: 84px; height: 84px; border-radius: 12px; background: var(--stage); padding: 6px; }
+.multi-thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.multi-fields { display: grid; gap: 6px; min-width: 0; }
+.multi-fields .input { height: 40px; font-size: 16px; } /* unter 16px zoomt iOS beim Antippen hinein */
 
 /* ---------- Toast ---------- */
 .toast {
