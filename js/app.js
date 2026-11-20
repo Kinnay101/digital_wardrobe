@@ -382,12 +382,27 @@ function setCategory(d, id) {
   d.category = id;
   refreshFields(d);
 }
-/** Farbe an- oder abwählen. Neue Farben bekommen einen kleinen Anteil, die Anteile werden neu verteilt. */
+/**
+ * Farbe an- oder abwählen. Eine wieder angewählte Farbe bekommt ihren gemessenen (bzw. zuletzt
+ * angezeigten) Anteil zurück, eine ganz neue 20 %; die übrigen Farben teilen sich den Rest.
+ */
 function toggleColor(d, id) {
+  const memory = (d.colorMemory ||= {});
   let list = d.colors.filter((c) => c.id !== 'bunt' || id === 'bunt');
   if (id === 'bunt') list = [{ id: 'bunt', share: 1 }];
-  else if (list.some((c) => c.id === id)) { if (list.length > 1) list = list.filter((c) => c.id !== id); }
-  else list = [...list.slice(0, 2), { id, share: list.length ? 0.25 : 1 }];
+  else if (list.some((c) => c.id === id)) {
+    if (list.length > 1) {
+      memory[id] = list.find((c) => c.id === id).share;
+      list = list.filter((c) => c.id !== id);
+    }
+  } else if (!list.length) list = [{ id, share: 1 }];
+  else {
+    const measured = d.analysisResult?.colors?.find((c) => c.id === id)?.share;
+    const share = Math.min(0.9, memory[id] ?? measured ?? 0.2);
+    const rest = list.slice(0, 2);
+    const restSum = rest.reduce((s, c) => s + c.share, 0) || 1;
+    list = [...rest.map((c) => ({ id: c.id, share: (c.share / restSum) * (1 - share) })), { id, share }];
+  }
   const sum = list.reduce((s, c) => s + c.share, 0);
   d.colors = list.map((c) => ({ id: c.id, share: Math.round((c.share / sum) * 100) / 100 }));
   d.color = primaryColor(d.colors);
