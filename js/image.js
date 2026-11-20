@@ -260,14 +260,17 @@ export const COLORS = [
   { id: 'weiss', name: 'Weiß', hex: '#F5F5F2' },
   { id: 'grau', name: 'Grau', hex: '#9A9A98' },
   { id: 'beige', name: 'Beige', hex: '#D9C7A7' },
+  { id: 'camel', name: 'Camel', hex: '#B98A55' },
   { id: 'braun', name: 'Braun', hex: '#7A5234' },
   { id: 'rot', name: 'Rot', hex: '#C3312D' },
+  { id: 'bordeaux', name: 'Bordeaux', hex: '#6E1E2A' },
   { id: 'rosa', name: 'Rosa', hex: '#E8A3B5' },
   { id: 'orange', name: 'Orange', hex: '#E07A2E' },
   { id: 'gelb', name: 'Gelb', hex: '#E8C547' },
   { id: 'gruen', name: 'Grün', hex: '#4E7A46' },
   { id: 'dunkelgruen', name: 'Dunkelgrün', hex: '#2C3E2D' },
   { id: 'oliv', name: 'Oliv', hex: '#6B6B3A' },
+  { id: 'hellblau', name: 'Hellblau', hex: '#9DBBD9' },
   { id: 'blau', name: 'Blau', hex: '#3E6FB8' },
   { id: 'navy', name: 'Navy', hex: '#1F2B4A' },
   { id: 'lila', name: 'Lila', hex: '#7C5AA6' },
@@ -288,6 +291,147 @@ function rgbToLab(r, g, b) {
   const y = f(R * 0.2126 + G * 0.7152 + B * 0.0722);
   const z = f((R * 0.0193 + G * 0.1192 + B * 0.9505) / 1.08883);
   return [116 * y - 16, 500 * (x - y), 200 * (y - z)];
+}
+
+// Zusätzliche Referenztöne je Farbgruppe (kräftige/helle Varianten), damit z. B. Königsblau nicht als Lila gilt
+const EXTRA_TONES = {
+  blau: ['#2A55D0', '#1E4FA8'], lila: ['#5B2C8F', '#B59AD6'], rot: ['#E02020', '#A82222'], gruen: ['#2FA84F', '#8DBF7A', '#9FD8C0'],
+  rosa: ['#F2C4CE', '#E0679A'], orange: ['#F28C28'], gelb: ['#F5D90A', '#F0E2A0'], hellblau: ['#B9D4EE', '#6FA8DC'],
+  grau: ['#C8C8C6', '#6A6A68'], beige: ['#EDE3CF'], navy: ['#24305E'], braun: ['#5A3A22'],
+};
+const PALETTE = () => COLORS.filter((c) => c.hex.startsWith('#'))
+  .flatMap((c) => [c.hex, ...(EXTRA_TONES[c.id] || [])].map((hex) => ({ id: c.id, lab: rgbToLab(...hexToRgb(hex)) })));
+const NEUTRAL = ['schwarz', 'weiss', 'grau'];
+
+/** Liest die sichtbaren Pixel eines Bildes als Lab-Werte (bei Fotos ohne Transparenz nur die Bildmitte). */
+async function visibleLab(blob, size = 96) {
+  const img = await loadImage(blob);
+  const scale = size / Math.max(img.naturalWidth, img.naturalHeight);
+  const w = Math.max(1, Math.round(img.naturalWidth * scale));
+  const h = Math.max(1, Math.round(img.naturalHeight * scale));
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, w, h);
+  const d = ctx.getImageData(0, 0, w, h).data;
+  let hasAlpha = false;
+  for (let i = 3; i < d.length; i += 4) if (d[i] < 250) { hasAlpha = true; break; }
+  const px = [];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!hasAlpha && (x < w * 0.25 || x > w * 0.75 || y < h * 0.2 || y > h * 0.8)) continue;
+      const i = (y * w + x) * 4;
+      if (d[i + 3] < 200) continue; // halbtransparente Kanten ignorieren
+      px.push(rgbToLab(d[i], d[i + 1], d[i + 2]));
+    }
+  }
+  return px;
+}
+
+// Abstand in Lab; Helligkeit schwächer gewichtet, damit Schatten und Falten keine eigene Farbe werden
+const labDist = (p, q, wl = 0.5) => {
+  const dl = (p[0] - q[0]) * wl, da = p[1] - q[1], db = p[2] - q[2];
+  return dl * dl + da * da + db * db;
+};
+
+/**
+ * Hauptfarben eines Kleidungsstücks: [{ id, share }] (max. 3, Anteile summieren sich zu 1).
+ * k-means in Lab, ähnliche Gruppen werden zusammengelegt und dann den Farbgruppen zugeordnet.
+ * Mehrere Bilder (Vorder- und Rückseite) werden zusammen ausgewertet.
+ */
+export async function extractColors(blobs) {
+  const px = [];
+  for (const b of [].concat(blobs).filter(Boolean)) px.push(...(await visibleLab(b)));
+  if (!px.length) return [{ id: 'grau', share: 1 }];
+
+  // k-means++-ähnlicher Start: helle, dunkle und möglichst unterschiedliche Punkte
+  const K = Math.min(6, px.length);
+  const centers = [px[Math.floor(px.length / 2)]];
+  while (centers.length < K) {
+    let best = null, bd = -1;
+    for (let i = 0; i < px.length; i += 3) {
+      const d = Math.min(...centers.map((c) => labDist(px[i], c)));
+      if (d > bd) { bd = d; best = px[i]; }
+    }
+    centers.push(best);
+  }
+  let assign = new Int32Array(px.length);
+  for (let it = 0; it < 12; it++) {
+    for (let i = 0; i < px.length; i++) {
+      let bi = 0, bd = Infinity;
+      for (let k = 0; k < centers.length; k++) { const d = labDist(px[i], centers[k]); if (d < bd) { bd = d; bi = k; } }
+      assign[i] = bi;
+    }
+    const sum = centers.map(() => [0, 0, 0, 0]);
+    for (let i = 0; i < px.length; i++) { const s = sum[assign[i]]; s[0] += px[i][0]; s[1] += px[i][1]; s[2] += px[i][2]; s[3]++; }
+    sum.forEach((s, k) => { if (s[3]) centers[k] = [s[0] / s[3], s[1] / s[3], s[2] / s[3]]; });
+  }
+  const counts = centers.map(() => 0);
+  for (let i = 0; i < px.length; i++) counts[assign[i]]++;
+
+  // Mischfarben an Kanten (z. B. Rand zwischen weißem und blauem Streifen) sind keine eigene Farbe:
+  // Liegt eine kleine Gruppe nahe der Verbindungslinie zweier größerer, wird sie auf diese verteilt.
+  const n = px.length;
+  for (let c = 0; c < centers.length; c++) {
+    if (!counts[c] || counts[c] / n > 0.2) continue;
+    let done = false;
+    for (let a = 0; a < centers.length && !done; a++) {
+      for (let b = a + 1; b < centers.length && !done; b++) {
+        if (a === c || b === c || counts[a] <= counts[c] || counts[b] <= counts[c]) continue;
+        const A = centers[a], B = centers[b], C = centers[c];
+        const ab = [B[0] - A[0], B[1] - A[1], B[2] - A[2]];
+        const len2 = ab[0] ** 2 + ab[1] ** 2 + ab[2] ** 2;
+        if (!len2) continue;
+        const t = ((C[0] - A[0]) * ab[0] + (C[1] - A[1]) * ab[1] + (C[2] - A[2]) * ab[2]) / len2;
+        if (t < 0.12 || t > 0.88) continue;
+        const proj = [A[0] + t * ab[0], A[1] + t * ab[1], A[2] + t * ab[2]];
+        if (labDist(C, proj, 1) > 12 * 12) continue;
+        counts[a] += counts[c] * (1 - t);
+        counts[b] += counts[c] * t;
+        counts[c] = 0;
+        done = true;
+      }
+    }
+  }
+
+  // Gleicher Farbton, nur heller/dunkler (Schatten, Falten) -> eine Gruppe
+  for (let a = 0; a < centers.length; a++) {
+    for (let b = 0; b < centers.length; b++) {
+      if (a === b || !counts[a] || !counts[b] || counts[b] > counts[a]) continue;
+      const A = centers[a], B = centers[b];
+      const dab = Math.hypot(A[1] - B[1], A[2] - B[2]);
+      const chroma = Math.max(Math.hypot(A[1], A[2]), Math.hypot(B[1], B[2]));
+      // Bei bunten Farben darf die Sättigung etwas mitschwanken, bei Grautönen nicht (sonst wird Weiß zu Grau)
+      const dL = Math.abs(A[0] - B[0]);
+      const same = chroma > 12 ? dab < Math.max(6, chroma * 0.3) && dL < 22 : dab < 8 && dL < 12;
+      if (same) {
+        const w = counts[a] + counts[b];
+        centers[a] = A.map((v, i) => (v * counts[a] + B[i] * counts[b]) / w);
+        counts[a] = w;
+        counts[b] = 0;
+      }
+    }
+  }
+
+  // Gruppen einer Farbgruppe zuordnen und zusammenzählen
+  const palette = PALETTE();
+  const shares = new Map();
+  centers.forEach((c, k) => {
+    if (!counts[k]) return;
+    let best = null, bd = Infinity;
+    for (const p of palette) { const d = labDist(c, p.lab, 0.7); if (d < bd) { bd = d; best = p.id; } }
+    shares.set(best, (shares.get(best) || 0) + counts[k] / px.length);
+  });
+  let list = [...shares.entries()].map(([id, share]) => ({ id, share })).sort((a, b) => b.share - a.share);
+  list = list.filter((c, i) => i === 0 || c.share >= 0.08).slice(0, 3);
+  const total = list.reduce((s, c) => s + c.share, 0);
+  return list.map((c) => ({ id: c.id, share: Math.round((c.share / total) * 100) / 100 }));
+}
+
+/** Eine Farbe für Namen und Anzeige: die Hauptfarbe – oder "bunt" bei drei kräftigen Farben. */
+export function primaryColor(colors) {
+  const strong = colors.filter((c) => c.share >= 0.15 && !NEUTRAL.includes(c.id));
+  return strong.length >= 3 ? 'bunt' : colors[0]?.id || 'grau';
 }
 
 /** Ermittelt die häufigste Farbe der sichtbaren Pixel und ordnet sie einer Farbgruppe zu. */

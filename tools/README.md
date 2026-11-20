@@ -20,4 +20,9 @@ Vorher immer: **Lizenz prüfen** (`info`). Erlaubt sind MIT, Apache, BSD o. ä. 
 1. **labels.json:** Text-Vektoren der Kleidungsarten für FashionSigLIP. Neu erzeugen, wenn sich die Liste `LABELS` in der Seite ändert. Ergebnis nach `js/labels.json` kopieren und die deutschen Namen in `KIND_DE` in `js/app.js` ergänzen. Ein Test am 20.11.2026 hat die vorhandene Datei byte-identisch reproduziert.
 2. **SEG_TOKENS:** Token-Nummern der CLIPSeg-Suchbegriffe. Neu erzeugen, wenn sich `SEG_GARMENTS` in `js/ai.js` oder die Gegenklassen ändern, und das Ergebnis in `js/ai.js` ersetzen. Nötig, weil transformers.js 4.3.2 den Tokenizer bei Modellen von der eigenen Adresse nicht laden kann.
 
+3. **attrs.json:** Text-Vektoren für Muster, Style und Saison (je Klasse über mehrere Beschreibungen gemittelt). Neu erzeugen, wenn sich `ATTR_GROUPS` in `js/attrs.js` ändert; danach `ANALYSIS_VERSION` in `js/analyze.js` hochzählen, damit vorhandene Teile neu analysiert werden.
+
 Die Seite lädt dafür einmalig die Text-Modelle von huggingface.co. Die App selbst lädt nie etwas von dort.
+
+## `receive.py` – Ergebnisse direkt speichern
+`python tools/receive.py` (lauscht nur auf 127.0.0.1:8001). Läuft er, speichert `labels.html` die erzeugten Dateien direkt nach `js/` statt sie herunterzuladen. Nimmt nur `attrs.json` und `labels.json` an.

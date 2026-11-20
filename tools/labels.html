@@ -17,15 +17,18 @@
 <ol>
   <li><code>js/labels.json</code> – Text-Vektoren der Kleidungsarten für FashionSigLIP (Kategorie-Erkennung). Nötig, wenn sich <code>LABELS</code> unten ändert. Danach in <code>js/app.js</code> die deutschen Namen in <code>KIND_DE</code> ergänzen.</li>
   <li><code>SEG_TOKENS</code> – Token-Nummern der CLIPSeg-Suchbegriffe. Nötig, wenn sich <code>SEG_GARMENTS</code> in <code>js/ai.js</code> oder die Gegenklassen unten ändern. Ergebnis in <code>js/ai.js</code> einfügen.</li>
+  <li><code>js/attrs.json</code> – Text-Vektoren für Muster, Style und Saison (je Klasse gemittelt über mehrere Beschreibungen). Nötig, wenn sich <code>ATTR_GROUPS</code> in <code>js/attrs.js</code> ändert.</li>
 </ol>
 <p>Starten: <code>python -m http.server 8000</code> im Projektordner, dann <a href="/tools/labels.html">localhost:8000/tools/labels.html</a> öffnen.</p>
 <button id="b1">1. labels.json erzeugen (lädt ~111 MB)</button>
 <button id="b2">2. SEG_TOKENS erzeugen (klein)</button>
+<button id="b3">3. attrs.json erzeugen (Muster/Style/Saison)</button>
 <pre id="out">Bereit.</pre>
 
 <script type="module">
 import * as TF from '../vendor/transformers/transformers.min.js';
 import { SEG_GARMENTS } from '../js/ai.js';
+import { ATTR_GROUPS } from '../js/attrs.js';
 
 TF.env.allowRemoteModels = true;   // nur dieses Werkzeug darf von huggingface.co laden
 TF.env.allowLocalModels = false;
@@ -81,6 +84,53 @@ document.getElementById('b1').onclick = async (e) => {
     const json = JSON.stringify({ model: M, license: 'Apache-2.0', template: TEMPLATE, dim, cats, labels, scales, emb: btoa(s) });
     download('labels.json', json);
     log(`Fertig: ${labels.length} Begriffe × ${dim} Werte. labels.json wurde heruntergeladen → nach js/labels.json kopieren.`);
+  } catch (err) { log('Fehler: ' + (err.stack || err)); }
+  e.target.disabled = false;
+};
+
+// Speichert lokal über tools/receive.py (falls gestartet), sonst normaler Download.
+async function save(name, text) {
+  try {
+    const r = await fetch(`http://127.0.0.1:8001/${name}`, { method: 'POST', body: text });
+    if (r.ok) return `gespeichert als js/${name}`;
+  } catch { /* Empfänger läuft nicht */ }
+  download(name, text);
+  return `heruntergeladen → nach js/${name} kopieren`;
+}
+
+document.getElementById('b3').onclick = async (e) => {
+  e.target.disabled = true;
+  try {
+    const M = 'Marqo/marqo-fashionSigLIP';
+    log('Lade Tokenizer und Text-Modell …');
+    const tok = await TF.AutoTokenizer.from_pretrained(M);
+    const model = await TF.SiglipTextModel.from_pretrained(M, {
+      dtype: 'q8',
+      progress_callback: (p) => { if (p.status === 'progress' && p.total) log(`Lade ${p.file}: ${Math.round(p.progress)} %`); },
+    });
+    const groups = {}, vecs = [];
+    for (const [g, classes] of Object.entries(ATTR_GROUPS)) {
+      groups[g] = classes.map((c) => c.id);
+      for (const c of classes) {
+        log(`Berechne ${g}/${c.id} …`);
+        const { text_embeds } = await model(tok(c.prompts, { padding: 'max_length', truncation: true }));
+        const list = text_embeds.normalize().tolist();
+        const mean = list[0].map((_, j) => list.reduce((s, v) => s + v[j], 0) / list.length);
+        const norm = Math.hypot(...mean);
+        vecs.push(mean.map((x) => x / norm));
+      }
+    }
+    const dim = vecs[0].length;
+    const q = new Int8Array(vecs.length * dim), scales = [];
+    vecs.forEach((v, i) => {
+      const m = Math.max(...v.map(Math.abs));
+      scales.push(+(m / 127).toPrecision(6));
+      v.forEach((x, j) => { q[i * dim + j] = Math.round(x / m * 127); });
+    });
+    let s = ''; const u = new Uint8Array(q.buffer);
+    for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]);
+    const json = JSON.stringify({ model: M, license: 'Apache-2.0', dim, groups, scales, emb: btoa(s) });
+    log(`Fertig: ${vecs.length} Klassen × ${dim} Werte, ${await save('attrs.json', json)}.`);
   } catch (err) { log('Fehler: ' + (err.stack || err)); }
   e.target.disabled = false;
 };

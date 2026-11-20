@@ -1,9 +1,10 @@
 import * as db from './db.js';
 import {
-  downscale, removeBackground, trimTransparent, detectColor, imageAspect, onWhite, extractGarments,
-  COLORS, colorById, blobToDataUrl, dataUrlToBlob,
+  downscale, removeBackground, trimTransparent, detectColor, imageAspect, extractGarments,
+  COLORS, colorById, primaryColor, blobToDataUrl, dataUrlToBlob,
 } from './image.js';
-import { classify } from './ai.js';
+import { analyzeItem, ANALYSIS_VERSION } from './analyze.js';
+import { PATTERNS, STYLES, patternName } from './attrs.js';
 import * as sync from './sync.js';
 
 // Deutsche Bezeichnungen für die erkannten Kleidungsarten (Schlüssel = Label in labels.json)
@@ -66,13 +67,47 @@ const state = {
 };
 
 const urls = new Map();
-function urlFor(item) {
-  if (!urls.has(item.id)) urls.set(item.id, URL.createObjectURL(item.image));
-  return urls.get(item.id);
+function urlFor(item, side = 'front') {
+  const key = side === 'back' ? item.id + ':back' : item.id;
+  const blob = side === 'back' ? item.back : item.image;
+  if (!blob) return '';
+  if (!urls.has(key)) urls.set(key, URL.createObjectURL(blob));
+  return urls.get(key);
 }
-function dropUrl(id) {
-  const u = urls.get(id);
-  if (u) { URL.revokeObjectURL(u); urls.delete(id); }
+function dropUrl(id, { backOnly = false } = {}) {
+  for (const key of backOnly ? [id + ':back'] : [id, id + ':back']) {
+    const u = urls.get(key);
+    if (u) { URL.revokeObjectURL(u); urls.delete(key); }
+  }
+}
+
+/** Farbliste eines Teils (ältere Teile haben nur eine Farbe). */
+const colorsOf = (it) => (it.colors?.length ? it.colors : [{ id: it.color || 'grau', share: 1 }]);
+
+/** Foto auswählen (Kamera oder Mediathek). Liefert die Datei oder null. */
+function pickPhoto() {
+  return new Promise((resolve) => {
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = 'image/*';
+    inp.hidden = true;
+    (sheet.open ? sheet : document.body).append(inp); // iOS braucht das Feld im Dokument
+    inp.onchange = () => { resolve(inp.files[0] || null); inp.remove(); };
+    inp.addEventListener('cancel', () => { resolve(null); inp.remove(); });
+    inp.click();
+  });
+}
+
+/** Foto verkleinern und freistellen. Liefert { original, cutout } (cutout = null, wenn es nicht klappt). */
+async function preparePhoto(file, onProgress) {
+  const original = await downscale(file);
+  let cutout = null;
+  try {
+    cutout = await trimTransparent(await removeBackground(original, onProgress));
+  } catch (err) {
+    console.warn('Freistellen fehlgeschlagen', err);
+  }
+  return { original, cutout };
 }
 const itemById = (id) => state.items.find((i) => i.id === id);
 
@@ -117,6 +152,7 @@ function renderChips(el, current, counts, onPick) {
 function renderWardrobeCount() {
   const parts = [];
   if (state.items.length) parts.push(plural(state.items.length, 'Teil', 'Teile'));
+  if (backfill.total) parts.push(`Analysiere ${Math.min(backfill.done + 1, backfill.total)}/${backfill.total} …`);
   const s = syncLabel();
   if (s) parts.push(s);
   $('#wardrobe-count').textContent = parts.join(' · ');
@@ -139,12 +175,14 @@ function renderWardrobe() {
 
   const list = state.wardrobeFilter === 'alle' ? state.items : state.items.filter((i) => i.category === state.wardrobeFilter);
   $('#wardrobe-grid').innerHTML = list.map((it) => {
-    const col = colorById(it.color);
+    const swatches = colorsOf(it).map((c) => `<span class="swatch" style="background:${colorById(c.id).hex}"></span>`).join('');
+    const pattern = it.pattern && it.pattern !== 'uni' ? ` · ${esc(patternName(it.pattern))}` : '';
     return `<button class="card" data-id="${it.id}">
       <div class="card-img"><img class="${it.cutout ? 'sticker' : ''}" src="${urlFor(it)}" alt="" loading="lazy"></div>
+      ${it.back ? '<span class="card-badge" title="Mit Rückseite">2 Seiten</span>' : ''}
       <div class="card-meta">
         <div class="card-title">${esc(it.name)}</div>
-        <div class="card-sub"><span class="swatch" style="background:${col.hex}"></span>${esc(catById(it.category).name)}</div>
+        <div class="card-sub"><span class="swatches">${swatches}</span><span class="card-sub-text">${esc(catById(it.category).name)}${pattern}</span></div>
       </div>
     </button>`;
   }).join('');
@@ -161,11 +199,19 @@ function closeSheet() {
   if (sheet.open) sheet.close();
 }
 
-/* Formularfelder für Name, Kategorie und Farbe (beim Hinzufügen und Bearbeiten) */
+/* Formularfelder für Name, Kategorie, Farben, Muster und Style (beim Hinzufügen und Bearbeiten) */
 function defaultName(d) {
   // Erkannte Art (z. B. "Longsleeve") nur nutzen, solange die Kategorie dazu passt
   const one = d.kind && d.kind.category === d.category ? d.kind.word : catById(d.category).one;
-  return d.color === 'bunt' ? `${one} (bunt)` : `${one} in ${colorById(d.color).name}`;
+  if (d.color === 'bunt') return `${one} (bunt)`;
+  const [c1, c2] = d.colors || [];
+  if (c1?.id === d.color && c2 && c2.share >= 0.3) return `${one} in ${colorById(c1.id).name} & ${colorById(c2.id).name}`;
+  return `${one} in ${colorById(d.color).name}`;
+}
+const pct = (v) => `${Math.round(v * 100)} %`;
+function colorBarHtml(colors) {
+  return `<div class="color-bar">${colors.map((c) => `<span style="flex:${c.share};background:${colorById(c.id).hex}"></span>`).join('')}</div>
+    <div class="color-legend">${colors.map((c) => `${esc(colorById(c.id).name)} ${pct(c.share)}`).join(' · ')}</div>`;
 }
 function itemFieldsHtml(d) {
   return `
@@ -177,15 +223,25 @@ function itemFieldsHtml(d) {
         ${CATEGORIES.map((c) => `<button type="button" class="chip" data-id="${c.id}" aria-selected="${c.id === d.category}">${esc(c.name)}</button>`).join('')}
       </div>
     </div>
-    <div class="field"><span>Farbe</span>
+    <div class="field"><span>Farben <small>bis zu 3 – antippen zum An- und Abwählen</small></span>
+      <div id="f-colorbar">${colorBarHtml(d.colors)}</div>
       <div class="color-picker" id="f-color">
-        ${COLORS.map((c) => `<button type="button" class="color-dot" data-id="${c.id}" title="${esc(c.name)}" aria-label="${esc(c.name)}" aria-pressed="${c.id === d.color}" style="background:${c.hex}"></button>`).join('')}
+        ${COLORS.map((c) => `<button type="button" class="color-dot" data-id="${c.id}" title="${esc(c.name)}" aria-label="${esc(c.name)}" aria-pressed="${d.colors.some((x) => x.id === c.id)}" style="background:${c.hex}"></button>`).join('')}
+      </div>
+    </div>
+    <div class="field"><span>Muster</span>
+      <div class="cat-picker" id="f-pattern">
+        ${PATTERNS.map((p) => `<button type="button" class="chip chip-sm" data-id="${p.id}" aria-selected="${p.id === d.pattern}">${esc(p.name)}</button>`).join('')}
+      </div>
+    </div>
+    <div class="field"><span>Style <small>mehrere möglich</small></span>
+      <div class="cat-picker" id="f-style">
+        ${STYLES.map((s) => `<button type="button" class="chip chip-sm" data-id="${s.id}" aria-selected="${d.styles.includes(s.id)}">${esc(s.name)}</button>`).join('')}
       </div>
     </div>`;
 }
 function bindItemFields(d) {
   const nameEl = $('#f-name', sheet);
-  const refreshPlaceholder = () => { nameEl.placeholder = defaultName(d); };
   nameEl.oninput = () => { d.name = nameEl.value; };
   $('#f-cat', sheet).onclick = (e) => {
     const b = e.target.closest('.chip');
@@ -196,21 +252,105 @@ function bindItemFields(d) {
   $('#f-color', sheet).onclick = (e) => {
     const b = e.target.closest('.color-dot');
     if (!b) return;
-    setColor(d, b.dataset.id);
+    d.colorsTouched = true;
+    toggleColor(d, b.dataset.id);
   };
-  return refreshPlaceholder;
+  $('#f-pattern', sheet).onclick = (e) => {
+    const b = e.target.closest('.chip');
+    if (!b) return;
+    d.patternTouched = true;
+    d.pattern = b.dataset.id;
+    refreshFields(d);
+  };
+  $('#f-style', sheet).onclick = (e) => {
+    const b = e.target.closest('.chip');
+    if (!b) return;
+    d.stylesTouched = true;
+    const id = b.dataset.id;
+    d.styles = d.styles.includes(id) ? d.styles.filter((s) => s !== id) : [...d.styles, id];
+    refreshFields(d);
+  };
+}
+/** Formular an den Entwurf d angleichen (nach Auswahl oder neuer Analyse). */
+function refreshFields(d) {
+  const sel = (box, isOn, attr = 'aria-selected') => sheet.querySelectorAll(`${box} [data-id]`).forEach((c) => c.setAttribute(attr, isOn(c.dataset.id)));
+  sel('#f-cat', (id) => id === d.category);
+  sel('#f-color', (id) => d.colors.some((c) => c.id === id), 'aria-pressed');
+  sel('#f-pattern', (id) => id === d.pattern);
+  sel('#f-style', (id) => d.styles.includes(id));
+  const bar = $('#f-colorbar', sheet);
+  if (bar) bar.innerHTML = colorBarHtml(d.colors);
+  const nameEl = $('#f-name', sheet);
+  if (nameEl) nameEl.placeholder = defaultName(d);
 }
 function setCategory(d, id) {
   d.category = id;
-  sheet.querySelectorAll('#f-cat .chip').forEach((c) => c.setAttribute('aria-selected', c.dataset.id === id));
-  const nameEl = $('#f-name', sheet);
-  if (nameEl) nameEl.placeholder = defaultName(d);
+  refreshFields(d);
 }
-function setColor(d, id) {
-  d.color = id;
-  sheet.querySelectorAll('#f-color .color-dot').forEach((c) => c.setAttribute('aria-pressed', c.dataset.id === id));
-  const nameEl = $('#f-name', sheet);
-  if (nameEl) nameEl.placeholder = defaultName(d);
+/** Farbe an- oder abwählen. Neue Farben bekommen einen kleinen Anteil, die Anteile werden neu verteilt. */
+function toggleColor(d, id) {
+  let list = d.colors.filter((c) => c.id !== 'bunt' || id === 'bunt');
+  if (id === 'bunt') list = [{ id: 'bunt', share: 1 }];
+  else if (list.some((c) => c.id === id)) { if (list.length > 1) list = list.filter((c) => c.id !== id); }
+  else list = [...list.slice(0, 2), { id, share: list.length ? 0.25 : 1 }];
+  const sum = list.reduce((s, c) => s + c.share, 0);
+  d.colors = list.map((c) => ({ id: c.id, share: Math.round((c.share / sum) * 100) / 100 }));
+  d.color = primaryColor(d.colors);
+  refreshFields(d);
+}
+/** Ergebnis einer Analyse in den Entwurf übernehmen – ohne Felder zu überschreiben, die du schon geändert hast. */
+function applyAnalysis(d, r) {
+  d.analysisResult = r;
+  d.kind = { category: r.category, word: KIND_DE[r.kindLabel] || catById(r.category).one };
+  if (!d.catTouched) d.category = r.category;
+  if (!d.colorsTouched) { d.colors = r.colors; d.color = r.color; }
+  if (!d.patternTouched) d.pattern = r.pattern;
+  if (!d.stylesTouched) d.styles = r.styles;
+  refreshFields(d);
+}
+/** Übernimmt die Formularwerte und Analyse-Daten eines Entwurfs in ein Kleidungsstück. */
+function draftToItem(d, item) {
+  Object.assign(item, {
+    name: d.name.trim() || defaultName(d), category: d.category,
+    color: d.color, colors: d.colors, pattern: d.pattern, styles: d.styles,
+  });
+  const r = d.analysisResult;
+  if (r) Object.assign(item, { kindLabel: r.kindLabel, patternScores: r.patternScores, styleScores: r.styleScores, warmth: r.warmth, emb: r.emb, analysis: r.analysis });
+  return item;
+}
+/** Leerer Entwurf mit Standardwerten. */
+const newDraft = (extra) => ({ name: '', color: 'grau', colors: [{ id: 'grau', share: 1 }], pattern: 'uni', styles: [], ...extra });
+
+/* Vorschau mit Umschalter Vorder-/Rückseite */
+function previewHtml(id) {
+  return `<div class="sheet-preview" id="${id}">
+    <div class="side-switch" hidden><button type="button" data-side="front" aria-pressed="true">Vorne</button><button type="button" data-side="back" aria-pressed="false">Hinten</button></div>
+  </div>`;
+}
+function bindPreview(el, getBlob) {
+  let side = 'front';
+  const sw = $('.side-switch', el);
+  const showSide = (s, { scanning = false } = {}) => {
+    side = s;
+    const { blob, cutout } = getBlob(side);
+    el.querySelector('img')?.remove();
+    el.querySelector('.scan')?.remove();
+    sw.querySelectorAll('[data-side]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.side === side));
+    if (!blob) return;
+    const img = new Image();
+    img.src = URL.createObjectURL(blob);
+    img.onload = () => URL.revokeObjectURL(img.src);
+    img.alt = side === 'back' ? 'Rückseite' : 'Vorderseite';
+    if (cutout) img.className = 'sticker';
+    el.prepend(img);
+    if (scanning) el.insertAdjacentHTML('beforeend', '<div class="scan"></div>');
+  };
+  sw.onclick = (e) => { const b = e.target.closest('[data-side]'); if (b) showSide(b.dataset.side); };
+  return {
+    show: showSide,
+    refresh: () => showSide(side),
+    setHasBack: (has) => { sw.hidden = !has; if (!has && side === 'back') showSide('front'); },
+  };
 }
 
 /* ---------- Teil hinzufügen ---------- */
@@ -220,16 +360,19 @@ async function openAddSheet(file) {
   const token = {};
   addToken = token;
   const alive = () => addToken === token;
-  const d = {
-    name: '', color: 'grau',
+  const d = newDraft({
     category: state.wardrobeFilter !== 'alle' ? state.wardrobeFilter : 'oberteile',
-    original: null, cutout: null, useCutout: true,
-  };
+    original: null, cutout: null, useCutout: true, backOriginal: null, backCutout: null,
+  });
 
   openSheet(`<div class="sheet-inner">
     <div class="sheet-head"><h2>Neues Teil</h2><button class="icon-btn" data-close aria-label="Schließen">${ICON.close}</button></div>
-    <div class="sheet-preview" id="add-preview"><div class="progress-pill" id="add-progress">Foto wird geladen …</div></div>
+    ${previewHtml('add-preview')}
     <label class="toggle-row" id="add-cutout-row" hidden>Hintergrund entfernen <input type="checkbox" id="add-cutout" checked></label>
+    <div class="row back-row" id="add-back-row" hidden>
+      <button class="btn btn-ghost" id="add-back">Rückseite hinzufügen</button>
+      <button class="btn btn-ghost" id="add-back-remove" hidden>Rückseite entfernen</button>
+    </div>
     <button class="btn btn-ghost btn-block" id="add-multi" style="margin-bottom:14px" hidden>Foto mit Person? Teile einzeln herauslösen</button>
     ${itemFieldsHtml(d)}
     <button class="btn btn-primary btn-block" id="add-save" disabled>Wird verarbeitet …</button>
@@ -237,23 +380,17 @@ async function openAddSheet(file) {
   bindItemFields(d);
 
   const preview = $('#add-preview', sheet);
+  preview.insertAdjacentHTML('beforeend', '<div class="progress-pill" id="add-progress">Foto wird geladen …</div>');
   const progress = $('#add-progress', sheet);
   // Fortschrittsanzeige: beim ersten Mal werden die KI-Modelle geladen, danach kommen sie aus dem Cache
   const loadingText = (busyText) => (f) => {
     if (!alive()) return;
     progress.textContent = f < 1 ? `KI-Modell wird geladen · ${Math.round(f * 100)} %` : busyText;
   };
-  const showImage = (blob, isCutout, scanning) => {
-    preview.querySelector('img')?.remove();
-    preview.querySelector('.scan')?.remove();
-    const img = new Image();
-    img.src = URL.createObjectURL(blob);
-    img.onload = () => URL.revokeObjectURL(img.src);
-    img.alt = 'Vorschau';
-    if (isCutout) img.className = 'sticker';
-    preview.prepend(img);
-    if (scanning) preview.insertAdjacentHTML('beforeend', '<div class="scan"></div>');
-  };
+  const useCut = () => !!(d.cutout && d.useCutout);
+  const view = bindPreview(preview, (side) => (side === 'back'
+    ? { blob: useCut() && d.backCutout ? d.backCutout : d.backOriginal, cutout: useCut() && !!d.backCutout }
+    : { blob: useCut() ? d.cutout : d.original, cutout: useCut() }));
 
   try {
     d.original = await downscale(file);
@@ -262,15 +399,12 @@ async function openAddSheet(file) {
     return;
   }
   if (!alive()) return;
-  showImage(d.original, false, true);
+  view.show('front', { scanning: true });
   progress.textContent = 'Hintergrund wird entfernt …';
-  setColor(d, await detectColor(d.original));
 
   try {
     const raw = await removeBackground(d.original, loadingText('Hintergrund wird entfernt …'));
     d.cutout = await trimTransparent(raw);
-    if (!alive()) return;
-    setColor(d, await detectColor(d.cutout));
   } catch (err) {
     console.warn('Freistellen fehlgeschlagen', err);
     d.useCutout = false;
@@ -278,28 +412,72 @@ async function openAddSheet(file) {
   }
   if (!alive()) return;
 
-  // Kategorie erkennen (überschreibt keine Auswahl, die du schon selbst getroffen hast)
-  progress.textContent = 'Kategorie wird erkannt …';
-  try {
-    const r = await classify(await onWhite(d.cutout || d.original), loadingText('Kategorie wird erkannt …'));
-    if (!alive()) return;
-    d.kind = { category: r.category, word: KIND_DE[r.label] || catById(r.category).one };
-    if (!d.catTouched) setCategory(d, r.category);
-    else setCategory(d, d.category);
-  } catch (err) {
-    console.warn('Kategorie-Erkennung fehlgeschlagen', err);
-  }
+  // Kategorie, Farben, Muster, Style erkennen (überschreibt nichts, was du schon selbst gewählt hast)
+  const frontBlob = () => d.cutout || d.original;
+  const backBlob = () => d.backCutout || d.backOriginal;
+  const analyze = async () => {
+    try {
+      const r = await analyzeItem({ front: frontBlob(), back: backBlob() }, loadingText('Wird analysiert …'));
+      if (alive()) applyAnalysis(d, r);
+    } catch (err) {
+      console.warn('Analyse fehlgeschlagen', err);
+      // Ohne KI wenigstens die Farbe bestimmen
+      if (alive() && !d.analysisResult && !d.colorsTouched) {
+        d.color = await detectColor(frontBlob());
+        d.colors = [{ id: d.color, share: 1 }];
+        refreshFields(d);
+      }
+    }
+  };
+  progress.textContent = 'Wird analysiert …';
+  await analyze();
   if (!alive()) return;
 
   progress.remove();
-  showImage(d.cutout && d.useCutout ? d.cutout : d.original, !!(d.cutout && d.useCutout), false);
+  view.show('front');
   if (d.cutout) {
     $('#add-cutout-row', sheet).hidden = false;
     $('#add-cutout', sheet).onchange = (e) => {
       d.useCutout = e.target.checked;
-      showImage(d.useCutout ? d.cutout : d.original, d.useCutout, false);
+      view.refresh();
     };
   }
+
+  // Rückseite (optional): eigenes Foto, wird genauso freigestellt; Muster/Farben werden neu berechnet
+  const backBtn = $('#add-back', sheet);
+  const backRemove = $('#add-back-remove', sheet);
+  $('#add-back-row', sheet).hidden = false;
+  backBtn.onclick = async () => {
+    const f = await pickPhoto();
+    if (!f || !alive()) return;
+    backBtn.disabled = true;
+    backBtn.textContent = 'Rückseite wird freigestellt …';
+    try {
+      const p = await preparePhoto(f);
+      if (!alive()) return;
+      d.backOriginal = p.original;
+      d.backCutout = p.cutout;
+      view.setHasBack(true);
+      view.show('back', { scanning: true });
+      backBtn.textContent = 'Wird analysiert …';
+      await analyze();
+      if (!alive()) return;
+      view.show('back');
+    } catch (err) {
+      console.warn(err);
+      toast('Die Rückseite konnte nicht gelesen werden');
+    }
+    backBtn.disabled = false;
+    backBtn.textContent = d.backOriginal ? 'Rückseite ersetzen' : 'Rückseite hinzufügen';
+    backRemove.hidden = !d.backOriginal;
+  };
+  backRemove.onclick = async () => {
+    d.backOriginal = d.backCutout = null;
+    view.setHasBack(false);
+    backRemove.hidden = true;
+    backBtn.textContent = 'Rückseite hinzufügen';
+    await analyze();
+  };
   // Mehrere Teile auf einem Foto mit Person: nur auf Wunsch (lädt beim ersten Mal ein weiteres Modell)
   const multiBtn = $('#add-multi', sheet);
   multiBtn.hidden = false;
@@ -331,19 +509,14 @@ async function openAddSheet(file) {
   saveBtn.textContent = 'In den Schrank legen';
   saveBtn.onclick = async () => {
     saveBtn.disabled = true;
-    const useCut = !!(d.cutout && d.useCutout);
-    const image = useCut ? d.cutout : d.original;
-    const item = {
-      id: db.uid(),
-      name: d.name.trim() || defaultName(d),
-      category: d.category,
-      color: d.color,
-      image,
-      cutout: useCut,
-      aspect: await imageAspect(image),
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
+    const cut = useCut();
+    const image = cut ? d.cutout : d.original;
+    const now = Date.now();
+    const item = draftToItem(d, { id: db.uid(), image, cutout: cut, aspect: await imageAspect(image), createdAt: now, updatedAt: now });
+    if (d.backOriginal) {
+      const backCut = cut && !!d.backCutout;
+      Object.assign(item, { back: backCut ? d.backCutout : d.backOriginal, backCutout: backCut, backRev: now });
+    }
     try {
       await db.put('items', item);
     } catch (err) {
@@ -352,7 +525,7 @@ async function openAddSheet(file) {
       saveBtn.disabled = false;
       return;
     }
-    sync.markChanged('item', item.id, 'put', { image: true });
+    sync.markChanged('item', item.id, 'put', { image: true, back: !!item.back });
     state.items.unshift(item);
     closeSheet();
     render();
@@ -365,8 +538,8 @@ function openMultiSheet(pieces) {
   const token = {};
   addToken = token;
   const alive = () => addToken === token;
-  const drafts = pieces.map((p) => ({
-    name: '', category: p.category, color: 'grau', kind: null, blob: p.blob, selected: true, url: URL.createObjectURL(p.blob),
+  const drafts = pieces.map((p) => newDraft({
+    category: p.category, kind: null, blob: p.blob, selected: true, url: URL.createObjectURL(p.blob),
   }));
   openSheet(`<div class="sheet-inner">
     <div class="sheet-head"><h2>${plural(drafts.length, 'Teil', 'Teile')} gefunden</h2><button class="icon-btn" data-close aria-label="Schließen">${ICON.close}</button></div>
@@ -396,15 +569,16 @@ function openMultiSheet(pieces) {
     el.onchange = () => { const d = drafts[el.dataset.cat]; d.category = el.value; d.catTouched = true; refresh(el.dataset.cat); };
   });
 
-  // Jedes Teil einzeln nachschärfen: Farbe + genaue Art (FashionSigLIP ist auf Einzelteilen sehr treffsicher)
+  // Jedes Teil einzeln nachschärfen: Farben, Art, Muster, Style (FashionSigLIP ist auf Einzelteilen sehr treffsicher)
   (async () => {
     for (let i = 0; i < drafts.length; i++) {
       const d = drafts[i];
       try {
-        d.color = await detectColor(d.blob);
-        const r = await classify(await onWhite(d.blob));
+        const r = await analyzeItem({ front: d.blob });
         if (!alive()) return;
-        d.kind = { category: r.category, word: KIND_DE[r.label] || catById(r.category).one };
+        d.analysisResult = r;
+        d.kind = { category: r.category, word: KIND_DE[r.kindLabel] || catById(r.category).one };
+        Object.assign(d, { colors: r.colors, color: r.color, pattern: r.pattern, styles: r.styles });
         if (!d.catTouched && r.confidence > 0.6) {
           d.category = r.category;
           const sel = sheet.querySelector(`[data-cat="${i}"]`);
@@ -422,10 +596,7 @@ function openMultiSheet(pieces) {
     for (const d of drafts) {
       if (!d.selected) continue;
       const now = Date.now();
-      const item = {
-        id: db.uid(), name: d.name.trim() || defaultName(d), category: d.category, color: d.color,
-        image: d.blob, cutout: true, aspect: await imageAspect(d.blob), createdAt: now, updatedAt: now,
-      };
+      const item = draftToItem(d, { id: db.uid(), image: d.blob, cutout: true, aspect: await imageAspect(d.blob), createdAt: now, updatedAt: now });
       await db.put('items', item);
       sync.markChanged('item', item.id, 'put', { image: true });
       state.items.unshift(item);
@@ -440,13 +611,24 @@ function openMultiSheet(pieces) {
 
 /* ---------- Teil ansehen / bearbeiten ---------- */
 function openItemSheet(item) {
-  const d = { name: item.name, category: item.category, color: item.color };
+  const d = {
+    name: item.name, category: item.category, color: item.color, colors: colorsOf(item),
+    pattern: item.pattern || 'uni', styles: item.styles || [],
+    back: item.back || null, backCutout: !!item.backCutout, backChanged: false,
+    // Bereits gespeicherte Werte gelten als "von dir gewählt": Neu analysieren schlägt nur vor
+    catTouched: true,
+  };
   const usedIn = state.outfits.filter((o) => o.pieces.some((p) => p.itemId === item.id)).length;
   openSheet(`<div class="sheet-inner">
     <div class="sheet-head"><h2>${esc(item.name)}</h2><button class="icon-btn" data-close aria-label="Schließen">${ICON.close}</button></div>
-    <div class="sheet-preview"><img class="${item.cutout ? 'sticker' : ''}" src="${urlFor(item)}" alt=""></div>
+    ${previewHtml('item-preview')}
+    <div class="row back-row">
+      <button class="btn btn-ghost" id="item-back">${item.back ? 'Rückseite ersetzen' : 'Rückseite hinzufügen'}</button>
+      <button class="btn btn-ghost" id="item-back-remove"${item.back ? '' : ' hidden'}>Rückseite entfernen</button>
+    </div>
     ${usedIn ? `<p class="note">Kommt in ${plural(usedIn, 'Outfit', 'Outfits')} vor.</p>` : ''}
     ${itemFieldsHtml(d)}
+    <button class="btn btn-ghost btn-block" id="item-reanalyze" style="margin-bottom:14px">Farben, Muster & Style neu erkennen</button>
     <div class="stack">
       <button class="btn btn-primary btn-block" id="item-save">Änderungen speichern</button>
       <div class="row">
@@ -456,11 +638,71 @@ function openItemSheet(item) {
     </div>
   </div>`);
   bindItemFields(d);
+  const view = bindPreview($('#item-preview', sheet), (side) => (side === 'back'
+    ? { blob: d.back, cutout: d.backCutout }
+    : { blob: item.image, cutout: item.cutout }));
+  view.setHasBack(!!d.back);
+  view.show('front');
+
+  const backBtn = $('#item-back', sheet);
+  const backRemove = $('#item-back-remove', sheet);
+  const reBtn = $('#item-reanalyze', sheet);
+  const reanalyze = async () => {
+    reBtn.disabled = true;
+    reBtn.textContent = 'Wird analysiert …';
+    try {
+      // Bewusst neu erkennen: Farben, Muster und Style dürfen überschrieben werden, Kategorie und Name nicht
+      d.colorsTouched = d.patternTouched = d.stylesTouched = false;
+      applyAnalysis(d, await analyzeItem({ front: item.image, back: d.back }, (f) => {
+        if (f < 1) reBtn.textContent = `KI-Modell wird geladen · ${Math.round(f * 100)} %`;
+      }));
+    } catch (err) {
+      console.warn(err);
+      toast('Analyse fehlgeschlagen');
+    }
+    reBtn.disabled = false;
+    reBtn.textContent = 'Farben, Muster & Style neu erkennen';
+  };
+  reBtn.onclick = reanalyze;
+  backBtn.onclick = async () => {
+    const f = await pickPhoto();
+    if (!f || !sheet.open) return;
+    backBtn.disabled = true;
+    backBtn.textContent = 'Wird freigestellt …';
+    try {
+      const p = await preparePhoto(f);
+      // Wie die Vorderseite: freigestellt, wenn die Vorderseite freigestellt ist
+      const cut = item.cutout && !!p.cutout;
+      Object.assign(d, { back: cut ? p.cutout : p.original, backCutout: cut, backChanged: true });
+      view.setHasBack(true);
+      view.show('back');
+      backRemove.hidden = false;
+      await reanalyze();
+    } catch (err) {
+      console.warn(err);
+      toast('Die Rückseite konnte nicht gelesen werden');
+    }
+    backBtn.disabled = false;
+    backBtn.textContent = d.back ? 'Rückseite ersetzen' : 'Rückseite hinzufügen';
+  };
+  backRemove.onclick = () => {
+    Object.assign(d, { back: null, backCutout: false, backChanged: true });
+    view.setHasBack(false);
+    backRemove.hidden = true;
+    backBtn.textContent = 'Rückseite hinzufügen';
+    reanalyze();
+  };
 
   $('#item-save', sheet).onclick = async () => {
-    Object.assign(item, { name: d.name.trim() || defaultName(d), category: d.category, color: d.color, updatedAt: Date.now() });
+    draftToItem(d, item);
+    item.updatedAt = Date.now();
+    if (d.backChanged) {
+      dropUrl(item.id, { backOnly: true });
+      if (d.back) Object.assign(item, { back: d.back, backCutout: d.backCutout, backRev: item.updatedAt });
+      else { delete item.back; delete item.backCutout; item.backRev = null; }
+    }
     await db.put('items', item);
-    sync.markChanged('item', item.id, 'put');
+    sync.markChanged('item', item.id, 'put', { back: d.backChanged });
     closeSheet();
     render();
     toast('Gespeichert');
@@ -1041,17 +1283,79 @@ function openRecoverySheet(code) {
 /** Nach einem Sync: Daten neu aus der lokalen Datenbank laden. */
 async function reloadFromDb() {
   const [items, outfits] = await Promise.all([db.getAll('items'), db.getAll('outfits')]);
-  const ids = new Set(items.map((i) => i.id));
-  for (const id of [...urls.keys()]) if (!ids.has(id)) dropUrl(id);
+  // Bilder können sich auf dem anderen Gerät geändert haben (z. B. neue Rückseite) -> Vorschau-Adressen neu erzeugen
+  for (const id of [...urls.keys()]) URL.revokeObjectURL(urls.get(id));
+  urls.clear();
   state.items = items.sort((a, b) => b.createdAt - a.createdAt);
   state.outfits = outfits.sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt));
   if (!sheet.open) render();
+  backfillAnalysis();
+}
+
+/* ---------- Bestand nachanalysieren ----------
+   Teile ohne (aktuelle) Analyse bekommen Farben, Muster, Style und Saison nachgetragen.
+   Läuft im Hintergrund, ein Teil nach dem anderen. Was du selbst gesetzt hast, bleibt erhalten. */
+const backfill = { running: false, done: 0, total: 0, failed: new Set() };
+async function backfillAnalysis() {
+  const todo = () => state.items.filter((i) => (i.analysis || 0) < ANALYSIS_VERSION && !backfill.failed.has(i.id));
+  if (backfill.running || !todo().length) return;
+  backfill.running = true;
+  backfill.done = 0;
+  try {
+    for (let list = todo(); list.length; list = todo()) {
+      backfill.total = backfill.done + list.length;
+      renderWardrobeCount();
+      const { id } = list[0];
+      try {
+        const start = itemById(id);
+        const r = await analyzeItem({ front: start.image, back: start.back });
+        const cur = itemById(id); // während der Analyse kann ein Sync die Liste ersetzt haben
+        if (cur && (cur.analysis || 0) < ANALYSIS_VERSION) {
+          await db.put('items', mergeAnalysis(cur, r));
+          sync.markChanged('item', id, 'put');
+        }
+      } catch (err) {
+        console.warn('Nachanalyse fehlgeschlagen', id, err);
+        backfill.failed.add(id);
+      }
+      backfill.done++;
+      if (state.view === 'wardrobe' && !sheet.open) renderWardrobe();
+    }
+  } finally {
+    backfill.running = false;
+    backfill.total = 0;
+    renderWardrobeCount();
+  }
+}
+/** Analyse in ein bestehendes Teil einfügen, ohne bereits gesetzte Werte zu überschreiben. */
+function mergeAnalysis(it, r) {
+  let colors = r.colors;
+  // Die bisherige Farbe (evtl. von dir gewählt) bleibt Hauptfarbe. Ist sie neu gar nicht dabei,
+  // ersetzt sie die erkannte Hauptfarbe (meist derselbe Ton, nur anders benannt, z. B. Creme: Weiß/Beige).
+  if (it.color && it.color !== 'bunt' && colors[0].id !== it.color) {
+    const own = colors.find((c) => c.id === it.color);
+    colors = own
+      ? [own, ...colors.filter((c) => c !== own)]
+      : [{ id: it.color, share: colors[0].share }, ...colors.slice(1)];
+  }
+  return Object.assign(it, {
+    colors: it.colors?.length ? it.colors : colors,
+    color: it.color || r.color,
+    pattern: it.pattern || r.pattern,
+    styles: it.styles?.length ? it.styles : r.styles,
+    kindLabel: it.kindLabel || r.kindLabel,
+    patternScores: r.patternScores, styleScores: r.styleScores, warmth: r.warmth, emb: r.emb,
+    analysis: r.analysis,
+    updatedAt: Date.now(),
+  });
 }
 
 async function exportBackup() {
   const btn = $('#do-export', sheet);
   if (btn) { btn.disabled = true; btn.textContent = 'Wird erstellt …'; }
-  const items = await Promise.all(state.items.map(async ({ image, ...rest }) => ({ ...rest, image: await blobToDataUrl(image) })));
+  const items = await Promise.all(state.items.map(async ({ image, back, ...rest }) => ({
+    ...rest, image: await blobToDataUrl(image), ...(back ? { back: await blobToDataUrl(back) } : {}),
+  })));
   const data = { app: 'kleiderschrank', version: 1, exportedAt: new Date().toISOString(), items, outfits: state.outfits };
   const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
   const a = document.createElement('a');
@@ -1075,8 +1379,9 @@ async function importBackup(file) {
     for (const raw of data.items) {
       if (knownItems.has(raw.id)) continue;
       const item = { ...raw, image: await dataUrlToBlob(raw.image) };
+      if (raw.back) item.back = await dataUrlToBlob(raw.back);
       await db.put('items', item);
-      sync.markChanged('item', item.id, 'put', { image: true });
+      sync.markChanged('item', item.id, 'put', { image: true, back: !!item.back });
       state.items.push(item);
       ni++;
     }
@@ -1160,6 +1465,7 @@ async function init() {
   show(location.hash.slice(1) || 'wardrobe');
   db.requestPersistence();
   sync.init().catch((err) => console.warn('Sync-Start', err));
+  setTimeout(backfillAnalysis, 2500); // Bestand nachanalysieren, sobald die App bereit ist
 
   if (authRedirect?.error) openInfoSheet('Link ungültig', `${esc(authRedirect.error)}. Bitte fordere einen neuen Link an.`);
   else if (authRedirect?.type === 'recovery') openResetSheet(authRedirect);

@@ -55,6 +55,17 @@ async function getClient() {
 const check = ({ data, error }) => { if (error) throw error; return data; };
 const iso = (ms) => new Date(ms).toISOString();
 const imagePath = (userId, id) => `${userId}/${id}`;
+const backPath = (userId, id) => `${userId}/${id}.back`;
+
+async function downloadImage(c, dek, path, type) {
+  const blob = check(await c.storage.from(BUCKET).download(path));
+  const bytes = await C.decryptBytes(dek, new Uint8Array(await blob.arrayBuffer()));
+  return new Blob([bytes], { type: type || 'image/png' });
+}
+async function uploadImage(c, dek, path, blob) {
+  const enc = await C.encryptBytes(dek, new Uint8Array(await blob.arrayBuffer()));
+  check(await c.storage.from(BUCKET).upload(path, new Blob([enc], { type: 'application/octet-stream' }), { upsert: true, contentType: 'application/octet-stream' }));
+}
 
 /** Fehlermeldungen von Supabase verständlich machen. */
 function explain(err) {
@@ -202,12 +213,15 @@ function attachTriggers() {
 
 /* ---------- Postausgang ---------- */
 
-/** Von der App nach jeder lokalen Änderung aufrufen. kind: 'item' | 'outfit', op: 'put' | 'delete'. */
-export async function markChanged(kind, id, op, { image = false } = {}) {
+/**
+ * Von der App nach jeder lokalen Änderung aufrufen. kind: 'item' | 'outfit', op: 'put' | 'delete'.
+ * image / back: Vorder- bzw. Rückseiten-Foto hat sich geändert und muss hochgeladen (oder entfernt) werden.
+ */
+export async function markChanged(kind, id, op, { image = false, back = false } = {}) {
   if (!status.signedIn) return;
   const key = `${kind}:${id}`;
   const prev = await db.get('outbox', key);
-  await db.put('outbox', { key, kind, id, op, image: image || !!prev?.image, at: Date.now() });
+  await db.put('outbox', { key, kind, id, op, image: image || !!prev?.image, back: back || !!prev?.back, at: Date.now() });
   setStatus({ pending: (await db.getAll('outbox')).length });
   clearTimeout(timer);
   timer = setTimeout(() => sync(), 1500);
@@ -215,7 +229,7 @@ export async function markChanged(kind, id, op, { image = false } = {}) {
 
 async function queueEverything() {
   const now = Date.now();
-  for (const it of await db.getAll('items')) await db.put('outbox', { key: `item:${it.id}`, kind: 'item', id: it.id, op: 'put', image: true, at: it.updatedAt || it.createdAt || now });
+  for (const it of await db.getAll('items')) await db.put('outbox', { key: `item:${it.id}`, kind: 'item', id: it.id, op: 'put', image: true, back: !!it.back, at: it.updatedAt || it.createdAt || now });
   for (const o of await db.getAll('outfits')) await db.put('outbox', { key: `outfit:${o.id}`, kind: 'outfit', id: o.id, op: 'put', image: false, at: o.updatedAt || o.createdAt || now });
 }
 
@@ -276,14 +290,16 @@ async function pull(c, dek, userId) {
         const updatedAt = Date.parse(row.updated_at);
         if (kind === 'item') {
           const local = await db.get('items', row.id);
-          let image = local?.image;
-          if (!image) {
-            const blob = check(await c.storage.from(BUCKET).download(imagePath(userId, row.id)));
-            const bytes = await C.decryptBytes(dek, new Uint8Array(await blob.arrayBuffer()));
-            image = new Blob([bytes], { type: data.imageType || 'image/png' });
+          const image = local?.image || await downloadImage(c, dek, imagePath(userId, row.id), data.imageType);
+          // Rückseite: nur laden, wenn es eine gibt und sie sich geändert hat (backRev = Zeitpunkt der letzten Änderung)
+          let back = null;
+          if (data.backRev) {
+            back = local?.back && local.backRev === data.backRev ? local.back : await downloadImage(c, dek, backPath(userId, row.id), data.backType);
           }
-          const { imageType, ...rest } = data;
-          await db.put('items', { ...rest, id: row.id, image, updatedAt });
+          const { imageType, backType, ...rest } = data;
+          const item = { ...rest, id: row.id, image, updatedAt };
+          if (back) item.back = back;
+          await db.put('items', item);
         } else {
           await db.put('outfits', { ...data, id: row.id, updatedAt });
         }
@@ -302,16 +318,17 @@ async function push(c, dek, userId) {
       const row = { id: e.id, payload: null, deleted: true, updated_at: iso(e.at) };
       if (e.kind === 'item') row.has_image = false;
       check(await c.from(table).upsert(row));
-      if (e.kind === 'item') await c.storage.from(BUCKET).remove([imagePath(userId, e.id)]);
+      if (e.kind === 'item') await c.storage.from(BUCKET).remove([imagePath(userId, e.id), backPath(userId, e.id)]);
     } else if (e.kind === 'item') {
       const it = await db.get('items', e.id);
       if (it) {
-        if (e.image) {
-          const enc = await C.encryptBytes(dek, new Uint8Array(await it.image.arrayBuffer()));
-          check(await c.storage.from(BUCKET).upload(imagePath(userId, it.id), new Blob([enc], { type: 'application/octet-stream' }), { upsert: true, contentType: 'application/octet-stream' }));
+        if (e.image) await uploadImage(c, dek, imagePath(userId, it.id), it.image);
+        if (e.back) {
+          if (it.back) await uploadImage(c, dek, backPath(userId, it.id), it.back);
+          else await c.storage.from(BUCKET).remove([backPath(userId, it.id)]);
         }
-        const { id, image, updatedAt, ...meta } = it;
-        const payload = await C.encryptJson(dek, { ...meta, imageType: image.type });
+        const { id, image, back, updatedAt, ...meta } = it;
+        const payload = await C.encryptJson(dek, { ...meta, imageType: image.type, ...(back ? { backType: back.type } : { backRev: null }) });
         check(await c.from('items').upsert({ id, payload, has_image: true, deleted: false, updated_at: iso(updatedAt || it.createdAt) }));
       }
     } else {

@@ -117,17 +117,26 @@ let clipPromise;
 function loadClip() {
   clipPromise ??= (async () => {
     const TF = await loadTf();
-    const [processor, model, labels] = await Promise.all([
+    const json = (name) => fetch(new URL(name, import.meta.url)).then((r) => r.json());
+    const [processor, model, labels, attrs] = await Promise.all([
       TF.AutoProcessor.from_pretrained(CLIP),
       // q8 auf WASM: im Test genauso treffsicher wie größere Varianten; WebGPU brachte hier keinen Vorteil
       TF.SiglipVisionModel.from_pretrained(CLIP, { dtype: 'q8', device: 'wasm', progress_callback: onProgress }),
-      fetch(new URL('./labels.json', import.meta.url)).then((r) => r.json()),
+      json('./labels.json'),
+      json('./attrs.json'),
     ]);
     // Text-Vektoren entpacken (int8 + Skalierung je Vektor)
-    const raw = Uint8Array.from(atob(labels.emb), (c) => c.charCodeAt(0));
-    const q = new Int8Array(raw.buffer);
-    const emb = labels.scales.map((s, i) => Float32Array.from(q.subarray(i * labels.dim, (i + 1) * labels.dim), (v) => v * s));
-    return { TF, processor, model, cats: labels.cats, labels: labels.labels, emb };
+    const unpack = (d) => {
+      const raw = Uint8Array.from(atob(d.emb), (c) => c.charCodeAt(0));
+      const q = new Int8Array(raw.buffer);
+      return d.scales.map((s, i) => Float32Array.from(q.subarray(i * d.dim, (i + 1) * d.dim), (v) => v * s));
+    };
+    const emb = unpack(labels);
+    const attrVecs = unpack(attrs);
+    let k = 0;
+    const attrGroups = {};
+    for (const [g, ids] of Object.entries(attrs.groups)) attrGroups[g] = ids.map((id) => ({ id, vec: attrVecs[k++] }));
+    return { TF, processor, model, cats: labels.cats, labels: labels.labels, emb, attrGroups };
   })().catch((err) => { clipPromise = null; throw err; });
   return clipPromise;
 }
@@ -183,7 +192,18 @@ export async function garmentMaps(blob, onLoadProgress) {
   }
 }
 
-/** Erkennt die Kategorie. Das Bild sollte freigestellt auf hellem Grund liegen. */
+const dot = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; };
+function softmax(logits) {
+  const max = Math.max(...logits);
+  const exp = logits.map((l) => Math.exp(l - max));
+  const sum = exp.reduce((a, b) => a + b, 0);
+  return exp.map((v) => v / sum);
+}
+
+/**
+ * Erkennt die Kategorie. Das Bild sollte freigestellt auf hellem Grund liegen.
+ * Liefert zusätzlich den Bild-Vektor (embedding) und die Merkmal-Wahrscheinlichkeiten (attrs).
+ */
 export async function classify(blob, onLoadProgress) {
   progressListener = onLoadProgress;
   try {
@@ -191,15 +211,27 @@ export async function classify(blob, onLoadProgress) {
     const image = await TF.RawImage.fromBlob(blob);
     const { image_embeds } = await model(await processor(image));
     const img = image_embeds.normalize().data;
-    const logits = emb.map((t) => { let s = 0; for (let i = 0; i < t.length; i++) s += t[i] * img[i]; return 100 * s; });
-    const max = Math.max(...logits);
-    const exp = logits.map((l) => Math.exp(l - max));
-    const sum = exp.reduce((a, b) => a + b, 0);
+    const logits = emb.map((t) => 100 * dot(t, img));
+    const probs = softmax(logits);
     const scores = {};
-    exp.forEach((v, i) => { scores[cats[i]] = (scores[cats[i]] || 0) + v / sum; });
+    probs.forEach((v, i) => { scores[cats[i]] = (scores[cats[i]] || 0) + v; });
     const [category, confidence] = Object.entries(scores).sort((a, b) => b[1] - a[1])[0];
-    return { category, confidence, label: labels[logits.indexOf(max)] };
+    return { category, confidence, label: labels[logits.indexOf(Math.max(...logits))], embedding: Float32Array.from(img), attrs: await scoreAttrs(img) };
   } finally {
     progressListener = null;
   }
+}
+
+/**
+ * Wahrscheinlichkeiten je Merkmal-Gruppe (Muster, Style, Saison) für einen Bild-Vektor.
+ * Funktioniert auch mit gespeicherten Vektoren, ohne das Bild-Modell erneut laufen zu lassen.
+ */
+export async function scoreAttrs(embedding) {
+  const { attrGroups } = await loadClip();
+  const out = {};
+  for (const [g, classes] of Object.entries(attrGroups)) {
+    const p = softmax(classes.map((c) => 100 * dot(c.vec, embedding)));
+    out[g] = Object.fromEntries(classes.map((c, i) => [c.id, p[i]]));
+  }
+  return out;
 }
