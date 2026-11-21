@@ -32,7 +32,7 @@ export async function downscale(file) {
 /** Entfernt den Hintergrund lokal im Browser und räumt die Maske auf. onProgress(0…1) beim Modell-Download. */
 export async function removeBackground(blob, onProgress) {
   const mask = await segmentMask(blob, onProgress);
-  cleanMask(mask.data, mask.width, mask.height);
+  cleanMask(mask.data, mask.width, mask.height, { dropEdge: true });
   const img = await loadImage(blob);
   const c = document.createElement('canvas');
   c.width = mask.width; c.height = mask.height;
@@ -126,18 +126,22 @@ export async function extractGarments(blob, onProgress) {
  *    ein Schuhpaar bleibt erhalten, weil beide Schuhe ähnlich groß sind)
  * 3. weiche Kanten nur direkt am Kleidungsstück behalten
  * 4. kleine Löcher im Stoff schließen (z. B. ein Aufdruck, den das Modell für Hintergrund hält)
+ * dropEdge: Nebenflächen, die den Bildrand berühren, fliegen raus – das sind angeschnittene Sachen,
+ * die daneben liegen (Rucksack, Schuh). Die größte Fläche bleibt immer. Nicht für Fotos mit Person
+ * (dort stoßen z. B. beide Schuhe an den unteren Rand).
  */
-export function cleanMask(a, w, h) {
+export function cleanMask(a, w, h, { dropEdge = false } = {}) {
   const n = w * h;
   for (let i = 0; i < n; i++) {
     if (a[i] < 24) a[i] = 0;
     else if (a[i] > 232) a[i] = 255;
   }
 
-  const { labels, sizes } = components(n, w, (i) => a[i] >= 128);
+  const { labels, sizes, border } = components(n, w, (i) => a[i] >= 128, true, h);
   if (sizes.length <= 1) return;
   const largest = Math.max(...sizes);
-  const keep = sizes.map((s) => s >= largest * 0.08);
+  const main = sizes.indexOf(largest);
+  const keep = sizes.map((s, k) => s >= largest * 0.08 && (k === main || !dropEdge || !border[k]));
   const keepMask = new Uint8Array(n);
   let keptArea = 0;
   for (let i = 0; i < n; i++) if (keep[labels[i]] && labels[i]) { keepMask[i] = 1; keptArea++; }
