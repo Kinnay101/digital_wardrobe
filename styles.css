@@ -316,6 +316,7 @@ h2 { font-size: 20px; letter-spacing: -.02em; margin: 0 0 6px; }
 .pinned-row .filter-label { padding-bottom: 0; }
 .pin-chip { border-color: var(--accent); }
 #today-grid { margin-top: 4px; }
+.today-note { grid-column: 1 / -1; margin: 0; }
 .today-card { cursor: default; }
 .today-card .stage { pointer-events: auto; touch-action: auto; }
 .today-card .piece { cursor: pointer; touch-action: auto; }

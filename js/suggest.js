@@ -83,6 +83,25 @@ function affinity(it, wants) {
   for (const [id, w] of Object.entries(wants)) { sum += w * v[STYLE_IDS.indexOf(id)]; tot += w; }
   return sum / tot;
 }
+/**
+ * Wie gut passt ein Teil zu einem gewählten Style (0…1)? Eingetragene Styles zählen voll,
+ * sonst die KI-Einschätzung im Verhältnis zum stärksten Style des Teils (höchstens 0.6).
+ */
+export function styleMatch(it, style) {
+  if (it.styles?.includes(style)) return 1;
+  const s = it.styleScores;
+  if (!s) return it.styles?.length ? 0.15 : 0.5;
+  const max = Math.max(...STYLE_IDS.map((id) => s[id] ?? 0)) || 1;
+  return 0.6 * (s[style] ?? 0) / max;
+}
+/** Vorherrschender Style eines Outfits (für den Namen). */
+export function outfitStyle(items) {
+  const core = items.filter((i) => !['accessoires', 'schuhe'].includes(i.category));
+  const sum = STYLE_IDS.map(() => 0);
+  for (const it of core) styleVec(it).forEach((v, k) => { sum[k] += v; });
+  return STYLE_IDS[sum.indexOf(Math.max(...sum))];
+}
+const CORE = new Set(['oberteile', 'hosen', 'kleider', 'jacken']);
 function cosine(a, b) {
   let d = 0, na = 0, nb = 0;
   for (let i = 0; i < a.length; i++) { d += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
@@ -174,6 +193,8 @@ export function suggest(items, { day = null, date, style = null, occasion = null
   for (const it of pool) {
     let s = 2 * affinity(it, wants) - 2.5 * recency(it, date) - (avoidSet.has(it.id) ? 0.8 : 0) + rand() * 0.9;
     if (LOUNGE.has(it.kindLabel) && occasion !== 'sport') s -= 1.2;
+    // Gewählter Style: deutlich bevorzugen (bei Schuhen etwas weniger, Accessoires egal)
+    if (style && it.category !== 'accessoires') s += (it.category === 'schuhe' ? 1.5 : 3) * (styleMatch(it, style) - 0.5);
     if (needs.target != null && ['schuhe', 'hosen'].includes(it.category)) s -= 1.5 * Math.abs(itemWarmth(it) - (it.category === 'hosen' ? 0.15 + needs.target * 0.4 : needs.target));
     unary.set(it.id, s);
   }
@@ -217,7 +238,7 @@ export function suggest(items, { day = null, date, style = null, occasion = null
       for (const shoe of shoeOptions) {
         const outfit = [...base, jacket, shoe, acc].filter(Boolean);
         // Etwas Zufall pro Kombination, damit "Neu würfeln" wirklich Neues zeigt
-        scored.push({ items: outfit, score: scoreOutfit(outfit, { base, jacket, shoe, needs, wants, unary, sport: occasion === 'sport' }) + rand() * 0.9 - (avoidSet.has(base[0].id) && !pinnedSet.has(base[0].id) ? 1.5 : 0) });
+        scored.push({ items: outfit, score: scoreOutfit(outfit, { base, jacket, shoe, needs, wants, unary, style, sport: occasion === 'sport' }) + rand() * 0.9 - (avoidSet.has(base[0].id) && !pinnedSet.has(base[0].id) ? 1.5 : 0) });
       }
     }
   }
@@ -240,10 +261,16 @@ export function suggest(items, { day = null, date, style = null, occasion = null
     if (!best) break;
     chosen.push(best);
   }
-  return { outfits: chosen, needs, problem: '' };
+  // Hinweis, wenn es im gewählten Style kaum passende Oberteile/Hosen/Kleider gibt
+  let note = '';
+  if (style) {
+    const hits = pool.filter((i) => ['oberteile', 'hosen', 'kleider'].includes(i.category) && styleMatch(i, style) >= 0.5).length;
+    if (hits < 2) note = 'Kaum Teile in diesem Style – die Vorschläge kommen ihm nur so nah wie möglich. Trag den Style bei passenden Teilen ein (Teil antippen → Bearbeiten).';
+  }
+  return { outfits: chosen, needs, problem: '', note };
 }
 
-function scoreOutfit(items, { base, jacket, shoe, needs, wants, unary, sport }) {
+function scoreOutfit(items, { base, jacket, shoe, needs, wants, unary, style, sport }) {
   let s = 0;
   for (const it of items) s += unary.get(it.id) ?? 0;
   s /= items.length;
@@ -269,6 +296,13 @@ function scoreOutfit(items, { base, jacket, shoe, needs, wants, unary, sport }) 
   for (let i = 0; i < vecs.length; i++) for (let j = i + 1; j < vecs.length; j++) { coh += cosine(vecs[i], vecs[j]); pairs++; }
   if (pairs) s += 1.5 * (coh / pairs);
   if (wants) s += 1.5 * items.reduce((a, it) => a + affinity(it, wants), 0) / items.length;
+  if (style) {
+    // Jedes Hauptteil soll zum Style passen; ein klar unpassendes Teil kostet extra
+    const core = items.filter((i) => CORE.has(i.category));
+    const m = core.map((i) => styleMatch(i, style));
+    s += 3 * m.reduce((a, v) => a + v, 0) / (m.length || 1);
+    s -= 1.5 * m.filter((v) => v < 0.35).length;
+  }
 
   s += 2 * colorScore(items);
   s += 1.5 * patternScore(items);

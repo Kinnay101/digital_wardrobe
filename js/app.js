@@ -5,7 +5,7 @@ import {
 } from './image.js';
 import { analyzeItem, ANALYSIS_VERSION } from './analyze.js';
 import { PATTERNS, STYLES, patternName, styleName } from './attrs.js';
-import { suggest, weatherNeeds, weatherTip, OCCASIONS } from './suggest.js';
+import { suggest, weatherNeeds, weatherTip, OCCASIONS, outfitStyle } from './suggest.js';
 import * as weather from './weather.js';
 import * as sync from './sync.js';
 
@@ -1407,7 +1407,8 @@ function renderToday() {
       pinned: t.pinned, seed: t.seed, count: 3, avoid: t.lastShown,
     });
   }
-  const { outfits, problem } = t.result;
+  const { outfits, problem, note } = t.result;
+  const titles = outfitTitles(outfits);
   const grid = $('#today-grid');
   const empty = $('#today-empty');
   empty.hidden = !!outfits.length;
@@ -1419,12 +1420,12 @@ function renderToday() {
       ${t.pinned.length || t.style || t.occasion ? '<button class="btn btn-ghost" data-action="today-reset">Filter zurücksetzen</button>' : ''}`;
     return;
   }
-  grid.innerHTML = outfits.map((o, i) => {
+  grid.innerHTML = (note ? `<p class="note today-note">${esc(note)}</p>` : '') + outfits.map((o, i) => {
     const worn = isWorn(o.items, isoDate(0));
     return `<div class="card outfit-card today-card" data-idx="${i}">
       <div class="stage"></div>
       <div class="card-meta" style="padding-top:12px">
-        <div class="card-title">Vorschlag ${i + 1}</div>
+        <div class="card-title">${esc(titles[i])}</div>
         <div class="card-sub card-sub-text">${esc(o.items.map((it) => it.name).join(' · '))}</div>
         <div class="today-card-actions">
           ${t.day === 0 ? `<button class="btn btn-ghost btn-sm" data-act="worn" aria-pressed="${worn}">${worn ? 'Getragen ✓' : 'Heute getragen'}</button>` : ''}
@@ -1440,6 +1441,39 @@ function renderToday() {
     // pid = Item-id, damit ein Antippen das Teil fixieren kann
     renderStage(stage, autoLayout(o.items).map((p) => ({ ...p, pid: p.itemId })), false);
     stage.querySelectorAll('.piece').forEach((p) => p.classList.toggle('pinned', t.pinned.includes(p.dataset.pid)));
+  });
+}
+
+/* Namen für Vorschläge: Style + auffälligstes Teil, z. B. „Streetwear mit Hoodie“ */
+const STYLE_LOOK = { casual: 'Casual', streetwear: 'Streetwear', smart: 'Smart', sport: 'Sportlich' };
+const NEUTRAL_COLORS = new Set(['schwarz', 'weiss', 'grau', 'beige', 'navy', 'camel', 'braun', 'hellblau', 'oliv']);
+const kindWord = (it) => KIND_DE[it.kindLabel] || catById(it.category).one;
+/** Das Teil, das ein Outfit prägt: Muster/Print vor Akzentfarbe vor Jacke vor Oberteil/Kleid. */
+function heroPiece(items) {
+  const core = items.filter((i) => ['oberteile', 'kleider', 'jacken', 'hosen'].includes(i.category));
+  return core.find((i) => i.pattern && i.pattern !== 'uni' && i.category !== 'hosen')
+    || core.find((i) => i.color === 'bunt' || !NEUTRAL_COLORS.has(i.color))
+    || core.find((i) => i.category === 'jacken')
+    || core.find((i) => ['oberteile', 'kleider'].includes(i.category))
+    || items[0];
+}
+function colorPhrase(items) {
+  const names = [];
+  for (const it of items.filter((i) => ['oberteile', 'kleider', 'jacken', 'hosen'].includes(i.category))) {
+    const n = it.color === 'bunt' ? 'Bunt' : colorById(it.color).name;
+    if (!names.includes(n)) names.push(n);
+  }
+  return names.length === 1 ? `Ton in Ton ${names[0]}` : names.slice(0, 2).join(' & ');
+}
+/** Eindeutige Namen für eine Liste von Vorschlägen. */
+function outfitTitles(outfits) {
+  const used = new Set();
+  return outfits.map((o) => {
+    const look = STYLE_LOOK[outfitStyle(o.items)] || 'Outfit';
+    const options = [`${look} mit ${kindWord(heroPiece(o.items))}`, `${look} in ${colorPhrase(o.items)}`, `${look}: ${o.items.filter((i) => i.category !== 'accessoires').slice(0, 2).map(kindWord).join(' & ')}`];
+    const title = options.find((t) => !used.has(t)) || `${options[0]} (${used.size + 1})`;
+    used.add(title);
+    return title;
   });
 }
 
@@ -1473,9 +1507,9 @@ async function toggleWorn(items, date) {
   return !undo;
 }
 
-async function saveSuggestion(items) {
+async function saveSuggestion(items, name) {
   const pieces = autoLayout(items);
-  const outfit = { id: db.uid(), name: suggestOutfitName(pieces), pieces, createdAt: Date.now(), updatedAt: Date.now() };
+  const outfit = { id: db.uid(), name: name || suggestOutfitName(pieces), pieces, createdAt: Date.now(), updatedAt: Date.now() };
   await db.put('outfits', outfit);
   sync.markChanged('outfit', outfit.id, 'put');
   state.outfits = [outfit, ...state.outfits];
@@ -1536,7 +1570,7 @@ function bindToday() {
     } else if (act === 'save') {
       const btn = e.target.closest('[data-act]');
       btn.disabled = true;
-      await saveSuggestion(o.items);
+      await saveSuggestion(o.items, outfitTitles(state.today.result.outfits)[+card.dataset.idx]);
       btn.textContent = 'Gespeichert';
     } else if (act === 'studio') {
       state.studio = { id: null, name: '', pieces: autoLayout(o.items) };
