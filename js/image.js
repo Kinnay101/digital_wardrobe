@@ -253,6 +253,105 @@ export async function trimTransparent(blob, pad = 8) {
   return canvasToBlob(out, 'image/png');
 }
 
+/* ---------- Drehen ---------- */
+
+/** Zeichnet ein Bild um deg Grad (im Uhrzeigersinn) gedreht auf eine passende Fläche (Ecken transparent). */
+function drawRotated(img, deg, scale = 1) {
+  const rad = (deg * Math.PI) / 180;
+  const w = img.naturalWidth * scale, h = img.naturalHeight * scale;
+  const cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(w * cos + h * sin));
+  c.height = Math.max(1, Math.round(w * sin + h * cos));
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.translate(c.width / 2, c.height / 2);
+  ctx.rotate(rad);
+  ctx.drawImage(img, -w / 2, -h / 2, w, h);
+  return c;
+}
+
+/** Dreht ein Bild um deg Grad im Uhrzeigersinn. Freigestellte Bilder werden danach wieder eng zugeschnitten. */
+export async function rotateImage(blob, deg, { trim = false } = {}) {
+  if (!blob || !(deg % 360)) return blob;
+  const out = await canvasToBlob(drawRotated(await loadImage(blob), deg), 'image/png');
+  return trim ? trimTransparent(out) : out;
+}
+
+/** Sichtbare Pixel (Alpha > 50 %) eines verkleinerten, gedrehten Bildes als Maske. */
+function smallMask(img, deg, size = 160) {
+  const c = drawRotated(img, deg, size / Math.max(img.naturalWidth, img.naturalHeight));
+  const { width: w, height: h } = c;
+  const d = c.getContext('2d').getImageData(0, 0, w, h).data;
+  const m = new Uint8Array(w * h);
+  for (let i = 0; i < m.length; i++) m[i] = d[i * 4 + 3] > 128 ? 1 : 0;
+  return { w, h, m };
+}
+
+/** Anteil der Spalten (Rand-Zone links bzw. rechts), die quer zwei getrennte Stoffbahnen haben – wie zwei Hosenbeine. */
+function legColumns(mask) {
+  const { w, h, m } = mask;
+  let x0 = w, x1 = -1, y0 = h, y1 = -1;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (m[y * w + x]) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+  if (x1 < 0) return null;
+  const W = x1 - x0 + 1, H = y1 - y0 + 1;
+  const minRun = Math.max(2, H * 0.08), minGap = Math.max(2, H * 0.04);
+  // Zusammenhängende Stoffstücke in einer Spalte; kleine Lücken (Falten, Nähte) werden überbrückt,
+  // sehr kurze Stücke (Kordel, Etikett) zählen nicht
+  const runsAt = (x) => {
+    let runs = 0, len = 0, gap = 0;
+    for (let y = y0; y <= y1; y++) {
+      if (m[y * w + x]) {
+        len += 1 + (len ? gap : 0);
+        gap = 0;
+      } else if (len && ++gap >= minGap) {
+        if (len >= minRun) runs++;
+        len = 0; gap = 0;
+      }
+    }
+    if (len >= minRun) runs++;
+    return runs;
+  };
+  const zone = Math.max(1, Math.round(W * 0.3));
+  const frac = (from) => { let n = 0; for (let i = 0; i < zone; i++) if (runsAt(from + i) >= 2) n++; return n / zone; };
+  return { W, H, left: frac(x0), right: frac(x1 - zone + 1) };
+}
+
+/**
+ * Schlägt vor, wie ein freigestelltes Teil gedreht werden sollte (Grad im Uhrzeigersinn, 0 = passt):
+ * 1. Schräg fotografiert: der Winkel (bis ±35°), bei dem der umschließende Rahmen am kleinsten ist.
+ * 2. Hose liegt quer: die Seite mit zwei Beinen kommt nach unten.
+ * Hochkant liegende Teile werden nie auf den Kopf gestellt (Schultern sähen sonst wie Beine aus).
+ */
+export async function suggestRotation(cutout) {
+  const img = await loadImage(cutout);
+  const base = smallMask(img, 0);
+  const pts = [];
+  for (let y = 0; y < base.h; y++) for (let x = 0; x < base.w; x++) if (base.m[y * base.w + x]) pts.push(x, y);
+  if (pts.length < 200) return 0;
+  const area = (deg) => {
+    const r = (deg * Math.PI) / 180, c = Math.cos(r), s = Math.sin(r);
+    let a = Infinity, b = -Infinity, e = Infinity, f = -Infinity;
+    for (let i = 0; i < pts.length; i += 2) {
+      const x = pts[i] * c - pts[i + 1] * s, y = pts[i] * s + pts[i + 1] * c;
+      if (x < a) a = x; if (x > b) b = x; if (y < e) e = y; if (y > f) f = y;
+    }
+    return (b - a) * (f - e);
+  };
+  let tilt = 0, best = area(0);
+  for (let deg = -35; deg <= 35; deg++) {
+    const v = area(deg);
+    if (v < best) { best = v; tilt = deg; }
+  }
+  // Nur deutlich schräge Fotos geradestellen
+  if (Math.abs(tilt) < 3 || best > area(0) * 0.97) tilt = 0;
+
+  const legs = legColumns(tilt ? smallMask(img, tilt) : base);
+  if (!legs || legs.W < legs.H * 1.15) return tilt;
+  if (legs.left >= 0.55 && legs.right <= 0.15) return tilt - 90; // Beine links -> gegen den Uhrzeigersinn
+  if (legs.right >= 0.55 && legs.left <= 0.15) return tilt + 90; // Beine rechts -> im Uhrzeigersinn
+  return tilt;
+}
+
 /* ---------- Farberkennung ---------- */
 
 export const COLORS = [

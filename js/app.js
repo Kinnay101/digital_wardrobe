@@ -1,6 +1,6 @@
 import * as db from './db.js';
 import {
-  downscale, removeBackground, trimTransparent, detectColor, imageAspect, extractGarments,
+  downscale, removeBackground, trimTransparent, detectColor, imageAspect, extractGarments, rotateImage, suggestRotation,
   COLORS, colorById, primaryColor, blobToDataUrl, dataUrlToBlob,
 } from './image.js';
 import { analyzeItem, ANALYSIS_VERSION } from './analyze.js';
@@ -146,7 +146,19 @@ async function preparePhoto(file, onProgress) {
   } catch (err) {
     console.warn('Freistellen fehlgeschlagen', err);
   }
-  return { original, cutout };
+  return autoOrient({ original, cutout });
+}
+/** Schräg oder quer fotografierte Teile geradestellen (nur mit Freistellung möglich); das Original dreht mit. */
+async function autoOrient(p) {
+  if (!p.cutout) return p;
+  try {
+    const deg = await suggestRotation(p.cutout);
+    if (!deg) return p;
+    return { original: await rotateImage(p.original, deg), cutout: await rotateImage(p.cutout, deg, { trim: true }) };
+  } catch (err) {
+    console.warn('Automatisches Drehen fehlgeschlagen', err);
+    return p;
+  }
 }
 const itemById = (id) => state.items.find((i) => i.id === id);
 
@@ -438,12 +450,31 @@ const newDraft = (extra) => ({ name: '', brand: '', color: 'grau', colors: [{ id
 /* Vorschau mit Umschalter Vorder-/Rückseite */
 function previewHtml(id) {
   return `<div class="sheet-preview" id="${id}">
+    <div class="rotate-tools" hidden>
+      <button type="button" data-rot="-90" aria-label="Nach links drehen" title="Nach links drehen"><svg viewBox="0 0 24 24"><path d="M4 4v5h5"/><path d="M4.6 9A8 8 0 1 1 6 16.5"/></svg></button>
+      <button type="button" data-rot="90" aria-label="Nach rechts drehen" title="Nach rechts drehen"><svg viewBox="0 0 24 24"><path d="M20 4v5h-5"/><path d="M19.4 9A8 8 0 1 0 18 16.5"/></svg></button>
+    </div>
     <div class="side-switch" hidden><button type="button" data-side="front" aria-pressed="true">Vorne</button><button type="button" data-side="back" aria-pressed="false">Hinten</button></div>
   </div>`;
 }
-function bindPreview(el, getBlob) {
+/** onRotate(side, deg): dreht das Foto der angezeigten Seite (Knöpfe erscheinen erst nach setRotatable(true)). */
+function bindPreview(el, getBlob, onRotate) {
   let side = 'front';
   const sw = $('.side-switch', el);
+  const rot = $('.rotate-tools', el);
+  rot.onclick = async (e) => {
+    const b = e.target.closest('[data-rot]');
+    if (!b || !onRotate || rot.dataset.busy) return;
+    rot.dataset.busy = '1';
+    try {
+      await onRotate(side, Number(b.dataset.rot));
+      showSide(side);
+    } catch (err) {
+      console.warn(err);
+      toast('Drehen fehlgeschlagen');
+    }
+    delete rot.dataset.busy;
+  };
   const showSide = (s, { scanning = false } = {}) => {
     side = s;
     const { blob, cutout } = getBlob(side);
@@ -464,6 +495,7 @@ function bindPreview(el, getBlob) {
     show: showSide,
     refresh: () => showSide(side),
     setHasBack: (has) => { sw.hidden = !has; if (!has && side === 'back') showSide('front'); },
+    setRotatable: (on) => { rot.hidden = !on || !onRotate; },
   };
 }
 
@@ -504,9 +536,16 @@ async function openAddSheet(file) {
     progress.textContent = f < 1 ? `KI-Modell wird geladen · ${Math.round(f * 100)} %` : busyText;
   };
   const useCut = () => !!(d.cutout && d.useCutout);
+  let reanalyzeTimer = null;
   const view = bindPreview(preview, (side) => (side === 'back'
     ? { blob: useCut() && d.backCutout ? d.backCutout : d.backOriginal, cutout: useCut() && !!d.backCutout }
-    : { blob: useCut() ? d.cutout : d.original, cutout: useCut() }));
+    : { blob: useCut() ? d.cutout : d.original, cutout: useCut() }), async (side, deg) => {
+    const [o, c] = side === 'back' ? ['backOriginal', 'backCutout'] : ['original', 'cutout'];
+    [d[o], d[c]] = await Promise.all([rotateImage(d[o], deg), rotateImage(d[c], deg, { trim: true })]);
+    // Art/Kategorie hängen von der Lage ab: kurz nach dem letzten Drehen neu erkennen
+    clearTimeout(reanalyzeTimer);
+    reanalyzeTimer = setTimeout(() => { if (alive()) analyze(); }, 800);
+  });
 
   try {
     d.original = await downscale(file);
@@ -520,7 +559,7 @@ async function openAddSheet(file) {
 
   try {
     const raw = await removeBackground(d.original, loadingText('Hintergrund wird entfernt …'));
-    d.cutout = await trimTransparent(raw);
+    Object.assign(d, await autoOrient({ original: d.original, cutout: await trimTransparent(raw) }));
   } catch (err) {
     console.warn('Freistellen fehlgeschlagen', err);
     d.useCutout = false;
@@ -551,6 +590,7 @@ async function openAddSheet(file) {
 
   progress.remove();
   view.show('front');
+  view.setRotatable(true);
   if (d.cutout) {
     $('#add-cutout-row', sheet).hidden = false;
     $('#add-cutout', sheet).onchange = (e) => {
@@ -816,9 +856,13 @@ function openItemEditSheet(item) {
   bindItemFields(d);
   const view = bindPreview($('#item-preview', sheet), (side) => (side === 'back'
     ? { blob: d.back, cutout: d.backCutout }
-    : { blob: d.front, cutout: d.cutout }));
+    : { blob: d.front, cutout: d.cutout }), async (side, deg) => {
+    if (side === 'back') Object.assign(d, { back: await rotateImage(d.back, deg, { trim: d.backCutout }), backChanged: true });
+    else Object.assign(d, { front: await rotateImage(d.front, deg, { trim: d.cutout }), frontChanged: true });
+  });
   view.setHasBack(!!d.back);
   view.show('front');
+  view.setRotatable(true);
 
   const frontBtn = $('#item-front', sheet);
   const backBtn = $('#item-back', sheet);
